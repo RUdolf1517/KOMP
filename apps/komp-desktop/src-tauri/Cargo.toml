@@ -1,0 +1,14 @@
+[package]
+name = "komp-desktop"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+tauri = { version = "2", features = [] }

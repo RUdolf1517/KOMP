@@ -1,0 +1,33 @@
+id = "system_monitor"
+name = "System monitor and media controls"
+enabled = true
+
+[[commands]]
+id = "media_play_pause"
+aliases = ["пауза", "поставь на паузу", "продолжи", "продолжить", "play pause", "pause", "resume"]
+patterns = []
+action = { type = "hotkey", keys = ["space"] }
+
+[[commands]]
+id = "media_next"
+aliases = ["следующий", "дальше", "переключи дальше", "следующий слайд", "next", "next slide"]
+patterns = []
+action = { type = "hotkey", keys = ["right"] }
+
+[[commands]]
+id = "media_previous"
+aliases = ["предыдущий", "назад", "переключи назад", "предыдущий слайд", "previous", "back"]
+patterns = []
+action = { type = "hotkey", keys = ["left"] }
+
+[[commands]]
+id = "scroll_down"
+aliases = ["пролистай вниз", "листай вниз", "вниз", "scroll down"]
+patterns = []
+action = { type = "hotkey", keys = ["page_down"] }
+
+[[commands]]
+id = "scroll_up"
+aliases = ["пролистай вверх", "листай вверх", "вверх", "scroll up"]
+patterns = []
+action = { type = "hotkey", keys = ["page_up"] }

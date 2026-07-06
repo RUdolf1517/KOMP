@@ -1,0 +1,29 @@
+id = "user_Goida"
+name = "Good"
+enabled = true
+commands = []
+
+[[scenarios]]
+id = "Goida"
+aliases = [
+    "гойда",
+    "Года",
+    "года",
+    "в годы",
+    "greta",
+    "greed",
+    "когда",
+    "год",
+    "годы"
+]
+patterns = []
+priority = 20
+
+[scenarios.sounds]
+
+[[scenarios.steps]]
+id = "Good_sound"
+
+[scenarios.steps.action]
+type = "play_sound"
+file = "plugins.example/scenarios/Goida/sounds/goida.mp3"

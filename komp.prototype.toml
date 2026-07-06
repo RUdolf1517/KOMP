@@ -6,8 +6,8 @@ english_fallback = true
 plugin_dirs = ["plugins.example"]
 
 [models]
-ru_vosk_path = "vendor/vosk/models/ru"
-en_vosk_path = "vendor/vosk/models/en"
+ru_vosk_path = "/Users/sergey/Documents/Codex/2026-07-05/gh/vendor/vosk/models/ru"
+en_vosk_path = "/Users/sergey/Documents/Codex/2026-07-05/gh/vendor/vosk/models/en"
 
 [lmstudio]
 enabled = false

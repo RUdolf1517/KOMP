@@ -2,8 +2,12 @@ target/
 .DS_Store
 *.log
 *.tmp
+apps/komp-desktop/src-tauri/gen/
+apps/komp-desktop/node_modules/
 
 # Local runtime config can contain absolute model paths.
 erez.toml
 komp.toml
 
+# User-created local scenarios are runtime data. Keep examples in plugins.example/.
+plugins.user/

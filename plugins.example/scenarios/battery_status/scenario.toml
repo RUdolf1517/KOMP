@@ -1,0 +1,12 @@
+id = "system_battery_status"
+name = "Battery status scenario"
+enabled = true
+
+[[scenarios]]
+id = "battery_status"
+aliases = ["сколько зарядки", "заряд батареи", "статус батареи", "сколько процентов батарея", "battery status"]
+priority = 55
+
+[[scenarios.steps]]
+id = "announce_battery"
+action = { type = "emit_event", event = "battery_status_requested", payload = {} }

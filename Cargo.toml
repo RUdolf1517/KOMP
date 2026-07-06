@@ -3,6 +3,7 @@ members = [
     "crates/erez-core",
     "crates/erez-daemon",
     "crates/erez-cli",
+    "apps/komp-desktop/src-tauri",
 ]
 resolver = "2"
 
@@ -16,6 +17,7 @@ license = "MIT"
 anyhow = "1.0"
 async-trait = "0.1"
 axum = { version = "0.7", features = ["ws"] }
+base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 cpal = "0.15"
 futures-util = "0.3"

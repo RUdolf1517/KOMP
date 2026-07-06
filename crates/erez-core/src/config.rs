@@ -142,7 +142,7 @@ impl Default for ErezConfig {
             whisper: WhisperConfig::default(),
             audio: AudioConfig::default(),
             sounds: SoundConfig::default(),
-            plugin_dirs: vec![PathBuf::from("plugins")],
+            plugin_dirs: vec![PathBuf::from("plugins.example")],
         }
     }
 }

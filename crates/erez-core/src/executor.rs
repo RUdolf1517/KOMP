@@ -369,6 +369,18 @@ fn platform_open_url(url: &str) -> Result<Command, ActionError> {
 #[cfg(target_os = "macos")]
 fn macos_hotkey(keys: &[String]) -> Result<Command, ActionError> {
     let (key, modifiers) = split_key_and_modifiers(keys)?;
+    if let Some(key_code) = macos_key_code(&key) {
+        let modifier_clause = if modifiers.is_empty() {
+            String::new()
+        } else {
+            format!(" using {{{}}}", modifiers.join(", "))
+        };
+        let mut command = Command::new("osascript");
+        command.arg("-e").arg(format!(
+            "tell application \"System Events\" to key code {key_code}{modifier_clause}"
+        ));
+        return Ok(command);
+    }
     let modifier_clause = if modifiers.is_empty() {
         String::new()
     } else {
@@ -380,6 +392,22 @@ fn macos_hotkey(keys: &[String]) -> Result<Command, ActionError> {
         key, modifier_clause
     ));
     Ok(command)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_key_code(key: &str) -> Option<u16> {
+    Some(match key {
+        "space" => 49,
+        "left" | "arrow_left" => 123,
+        "right" | "arrow_right" => 124,
+        "down" | "arrow_down" => 125,
+        "up" | "arrow_up" => 126,
+        "page_down" | "pagedown" => 121,
+        "page_up" | "pageup" => 116,
+        "home" => 115,
+        "end" => 119,
+        _ => return None,
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -394,7 +422,7 @@ fn windows_hotkey(keys: &[String]) -> Result<Command, ActionError> {
             _ => "",
         });
     }
-    sequence.push_str(&key);
+    sequence.push_str(windows_send_key(&key));
     let script = format!(
         "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')",
         sequence
@@ -402,6 +430,22 @@ fn windows_hotkey(keys: &[String]) -> Result<Command, ActionError> {
     let mut command = Command::new("powershell");
     command.args(["-NoProfile", "-Command", &script]);
     Ok(command)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_send_key(key: &str) -> &str {
+    match key {
+        "space" => " ",
+        "left" | "arrow_left" => "{LEFT}",
+        "right" | "arrow_right" => "{RIGHT}",
+        "down" | "arrow_down" => "{DOWN}",
+        "up" | "arrow_up" => "{UP}",
+        "page_down" | "pagedown" => "{PGDN}",
+        "page_up" | "pageup" => "{PGUP}",
+        "home" => "{HOME}",
+        "end" => "{END}",
+        other => other,
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

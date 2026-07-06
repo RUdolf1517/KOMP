@@ -1,27 +1,30 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        State, WebSocketUpgrade,
+        Path as AxumPath, State, WebSocketUpgrade,
     },
     http::StatusCode,
     response::{sse::Event, IntoResponse, Sse},
     routing::{get, post},
     Json, Router,
 };
-use erez_core::Action;
+use base64::{engine::general_purpose, Engine as _};
 use erez_core::{
     apply_slots_to_action, ActionExecutor, AssistantEvent, DefaultIntentResolver, ErezConfig,
-    EventKind, IntentRequest, IntentResolver, IntentResult, NoopReplyProvider, PluginRegistry,
-    ScenarioRunner, StaticReplyProvider,
+    EventKind, IntentRequest, IntentResolver, IntentResult, LmStudioConfig, NoopReplyProvider,
+    PluginRegistry, ScenarioRunner, StaticReplyProvider,
 };
+use erez_core::{plugins::Scenario, Action, PluginManifest};
 use futures_util::{SinkExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::{HashMap, HashSet},
     convert::Infallible,
     fs,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
@@ -35,8 +38,26 @@ use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
 const AUDIO_PLAYBACK_INITIAL_GUARD_MS: u64 = 3_000;
+const SYSTEM_SOUND_EXTENSIONS: [&str; 3] = ["mp3", "wav", "ogg"];
+const SYSTEM_SOUND_SLOTS: [&str; 14] = [
+    "power_connected",
+    "power_disconnected",
+    "battery_0_10",
+    "battery_10_20",
+    "battery_20_30",
+    "battery_30_40",
+    "battery_40_50",
+    "battery_50_60",
+    "battery_60_70",
+    "battery_70_80",
+    "battery_80_90",
+    "battery_90_100",
+    "battery_100",
+    "battery_unavailable",
+];
 const AUDIO_PLAYBACK_SETTLE_GUARD_MS: u64 = 700;
 const SCENARIO_AUDIO_GUARD_MS: u64 = 8_000;
+const DEFAULT_USER_PLUGIN_ROOT: &str = "plugins.user";
 
 #[derive(Clone)]
 struct AppState {
@@ -75,6 +96,54 @@ struct ModelsResponse {
     wake_grammar: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScenarioDocument {
+    manifest_id: String,
+    manifest_name: String,
+    enabled: bool,
+    scenario: Scenario,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ScenarioSummary {
+    id: String,
+    manifest_id: String,
+    manifest_name: String,
+    aliases: Vec<String>,
+    patterns: Vec<String>,
+    priority: i32,
+    step_count: usize,
+    readonly: bool,
+    path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ValidationResponse {
+    ok: bool,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AppInfo {
+    name: String,
+    path: Option<String>,
+    source: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SoundUploadRequest {
+    file_name: String,
+    data_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LmStudioTestResponse {
+    ok: bool,
+    base_url: String,
+    models: Vec<String>,
+    error: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -109,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
         Some(state.audio_playback_until_ms.as_ref()),
     );
     maybe_autostart_listener(state.clone());
+    start_system_monitor(state.clone());
 
     let app = build_router(state.clone());
 
@@ -153,8 +223,22 @@ fn build_router(state: AppState) -> Router {
         .route("/listen/live", post(listen_live))
         .route("/listen/start", post(listen_start))
         .route("/listen/stop", post(listen_stop))
-        .route("/config", post(update_config))
+        .route("/config", get(get_config).post(update_config))
+        .route("/lmstudio/test", post(lmstudio_test))
         .route("/models", get(models))
+        .route("/scenarios", get(scenarios_list).post(scenarios_create))
+        .route(
+            "/scenarios/:id",
+            get(scenarios_get)
+                .put(scenarios_update)
+                .delete(scenarios_delete),
+        )
+        .route("/scenarios/:id/validate", post(scenarios_validate))
+        .route("/scenarios/:id/dry-run", post(scenarios_dry_run))
+        .route("/scenarios/:id/sounds", post(scenarios_sound_upload))
+        .route("/system-sounds/:slot", post(system_sound_upload))
+        .route("/apps", get(apps_list))
+        .route("/logo", get(logo_get))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -169,6 +253,14 @@ fn load_initial_config() -> ErezConfig {
         })
         .or_else(|| {
             let path = PathBuf::from("erez.toml");
+            path.exists().then_some(path)
+        })
+        .or_else(|| {
+            let path = PathBuf::from("komp.prototype.toml");
+            path.exists().then_some(path)
+        })
+        .or_else(|| {
+            let path = PathBuf::from("erez.prototype.toml");
             path.exists().then_some(path)
         });
 
@@ -219,18 +311,343 @@ async fn models(State(state): State<AppState>) -> Json<ModelsResponse> {
     })
 }
 
-async fn commands_reload(State(state): State<AppState>) -> impl IntoResponse {
+async fn scenarios_list(State(state): State<AppState>) -> impl IntoResponse {
     let config = state.config.read().await.clone();
-    let registry = load_registry(&config);
-    let count = registry.manifests().len();
-    *state.registry.write().await = registry;
-    emit(
-        &state,
-        EventKind::Status,
-        "commands reloaded",
-        json!({ "plugin_count": count }),
-    );
+    Json(json!({ "scenarios": collect_scenario_summaries(&config) }))
+}
+
+async fn scenarios_get(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let config = state.config.read().await.clone();
+    match find_scenario_document(&config, &id) {
+        Ok(Some((document, readonly, path))) => (
+            StatusCode::OK,
+            Json(
+                json!({ "scenario": document, "readonly": readonly, "path": path.display().to_string() }),
+            ),
+        ),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "scenario not found" })),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn scenarios_create(
+    State(state): State<AppState>,
+    Json(document): Json<ScenarioDocument>,
+) -> impl IntoResponse {
+    let config = state.config.read().await.clone();
+    let validation = validate_scenario_document(&document, &config, None);
+    if !validation.errors.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!(validation)));
+    }
+
+    match write_user_scenario(&document, false) {
+        Ok(path) => {
+            reload_registry(&state).await;
+            (
+                StatusCode::CREATED,
+                Json(json!({ "ok": true, "path": path.display().to_string() })),
+            )
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn scenarios_update(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(mut document): Json<ScenarioDocument>,
+) -> impl IntoResponse {
+    document.scenario.id = id.clone();
+    let config = state.config.read().await.clone();
+    if scenario_is_readonly(&config, &id) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "system scenarios are read-only" })),
+        );
+    }
+    let validation = validate_scenario_document(&document, &config, Some(&id));
+    if !validation.errors.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!(validation)));
+    }
+
+    match write_user_scenario(&document, true) {
+        Ok(path) => {
+            reload_registry(&state).await;
+            (
+                StatusCode::OK,
+                Json(json!({ "ok": true, "path": path.display().to_string() })),
+            )
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn scenarios_delete(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let config = state.config.read().await.clone();
+    if scenario_is_readonly(&config, &id) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "system scenarios are read-only" })),
+        );
+    }
+    let path = user_scenario_dir(&id);
+    if !path.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "user scenario not found" })),
+        );
+    }
+    match fs::remove_dir_all(&path) {
+        Ok(()) => {
+            reload_registry(&state).await;
+            (StatusCode::OK, Json(json!({ "ok": true })))
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn scenarios_validate(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    body: Option<Json<ScenarioDocument>>,
+) -> impl IntoResponse {
+    let config = state.config.read().await.clone();
+    let validation = if let Some(Json(mut document)) = body {
+        document.scenario.id = id;
+        validate_scenario_document(&document, &config, Some(&document.scenario.id))
+    } else {
+        match find_scenario_document(&config, &id) {
+            Ok(Some((document, _, _))) => validate_scenario_document(&document, &config, Some(&id)),
+            Ok(None) => ValidationResponse {
+                ok: false,
+                errors: vec!["scenario not found".into()],
+            },
+            Err(err) => ValidationResponse {
+                ok: false,
+                errors: vec![err.to_string()],
+            },
+        }
+    };
+    let status = if validation.ok {
+        StatusCode::OK
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    (status, Json(json!(validation)))
+}
+
+async fn scenarios_dry_run(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let registry = state.registry.read().await.clone();
+    let Some((manifest, _)) = registry.manifests().iter().find_map(|manifest| {
+        manifest
+            .scenarios
+            .iter()
+            .find(|scenario| scenario.id == id)
+            .map(|scenario| (manifest, scenario))
+    }) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "scenario not found" })),
+        );
+    };
+    let runner = ScenarioRunner::new(registry.clone(), ActionExecutor).dry_run(true);
+    let mut replies = NoopReplyProvider;
+    match runner.run(&manifest.id, &id, HashMap::new(), &mut replies) {
+        Ok(run) => (StatusCode::OK, Json(json!({ "run": run }))),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn scenarios_sound_upload(
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<SoundUploadRequest>,
+) -> impl IntoResponse {
+    if !is_safe_id(&id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid scenario id" })),
+        );
+    }
+    let file_name = sanitize_sound_file_name(&request.file_name);
+    if file_name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid sound file name" })),
+        );
+    }
+    let relative = user_plugin_root()
+        .join("scenarios")
+        .join(&id)
+        .join("sounds")
+        .join(&file_name);
+    let extension = relative
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "mp3" | "wav" | "ogg") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "sound file must be MP3, WAV or OGG" })),
+        );
+    }
+    let bytes = match general_purpose::STANDARD.decode(request.data_base64.as_bytes()) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": err.to_string() })),
+            )
+        }
+    };
+    if let Some(parent) = relative.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": err.to_string() })),
+            );
+        }
+    }
+    match fs::write(&relative, bytes) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "file": relative.display().to_string() })),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn system_sound_upload(
+    AxumPath(slot): AxumPath<String>,
+    Json(request): Json<SoundUploadRequest>,
+) -> impl IntoResponse {
+    if !SYSTEM_SOUND_SLOTS.contains(&slot.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "unknown system sound slot" })),
+        );
+    }
+    let file_name = sanitize_sound_file_name(&request.file_name);
+    let extension = Path::new(&file_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !SYSTEM_SOUND_EXTENSIONS.contains(&extension.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "sound file must be MP3, WAV or OGG" })),
+        );
+    }
+    let bytes = match general_purpose::STANDARD.decode(request.data_base64.as_bytes()) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": err.to_string() })),
+            )
+        }
+    };
+    let root = PathBuf::from("sounds/system");
+    if let Err(err) = fs::create_dir_all(&root) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        );
+    }
+    for existing_extension in SYSTEM_SOUND_EXTENSIONS {
+        if existing_extension != extension {
+            let _ = fs::remove_file(root.join(format!("{slot}.{existing_extension}")));
+        }
+    }
+    let path = root.join(format!("{slot}.{extension}"));
+    match fs::write(&path, bytes) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "file": path.display().to_string(), "slot": slot })),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn apps_list() -> impl IntoResponse {
+    Json(json!({ "apps": scan_installed_apps() }))
+}
+
+async fn logo_get() -> impl IntoResponse {
+    let Some(path) = find_logo_path() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "logo not found" })),
+        );
+    };
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let mime = match path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or_default()
+            {
+                "svg" => "image/svg+xml",
+                "jpg" | "jpeg" => "image/jpeg",
+                "webp" => "image/webp",
+                _ => "image/png",
+            };
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "path": path.display().to_string(),
+                    "data_url": format!("data:{mime};base64,{}", general_purpose::STANDARD.encode(bytes))
+                })),
+            )
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn commands_reload(State(state): State<AppState>) -> impl IntoResponse {
+    let count = reload_registry(&state).await;
     Json(json!({ "ok": true, "plugin_count": count }))
+}
+
+async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.config.read().await.clone())
 }
 
 async fn update_config(
@@ -241,6 +658,73 @@ async fn update_config(
     *state.registry.write().await = load_registry(&config);
     emit(&state, EventKind::Status, "config updated", json!({}));
     Json(config)
+}
+
+async fn lmstudio_test(
+    State(state): State<AppState>,
+    body: Option<Json<LmStudioConfig>>,
+) -> impl IntoResponse {
+    let config = if let Some(Json(config)) = body {
+        config
+    } else {
+        state.config.read().await.lmstudio.clone()
+    };
+    Json(test_lmstudio_connection(config).await)
+}
+
+async fn test_lmstudio_connection(config: LmStudioConfig) -> LmStudioTestResponse {
+    let base_url = config.base_url.trim_end_matches('/').to_string();
+    let url = format!("{base_url}/models");
+    let timeout = Duration::from_millis(config.timeout_ms.max(500));
+    let client = match reqwest::Client::builder().timeout(timeout).build() {
+        Ok(client) => client,
+        Err(err) => {
+            return LmStudioTestResponse {
+                ok: false,
+                base_url,
+                models: Vec::new(),
+                error: Some(err.to_string()),
+            }
+        }
+    };
+    match client.get(url).send().await {
+        Ok(response) if response.status().is_success() => {
+            let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+            let models = body
+                .get("data")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.get("id").and_then(Value::as_str))
+                        .map(ToOwned::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            LmStudioTestResponse {
+                ok: true,
+                base_url,
+                models,
+                error: None,
+            }
+        }
+        Ok(response) => {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            LmStudioTestResponse {
+                ok: false,
+                base_url,
+                models: Vec::new(),
+                error: Some(format!("LM Studio returned {status}: {body}")),
+            }
+        }
+        Err(err) => LmStudioTestResponse {
+            ok: false,
+            base_url,
+            models: Vec::new(),
+            error: Some(err.to_string()),
+        },
+    }
 }
 
 async fn listen_once(
@@ -460,6 +944,266 @@ fn maybe_autostart_listener(state: AppState) {
     }
 }
 
+fn start_system_monitor(state: AppState) {
+    tokio::spawn(async move {
+        let mut last_power_connected =
+            read_battery_snapshot().map(|snapshot| snapshot.power_connected);
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        info!(?last_power_connected, "system battery monitor started");
+        loop {
+            interval.tick().await;
+            let Some(snapshot) = read_battery_snapshot() else {
+                info!("system battery monitor could not read battery status");
+                continue;
+            };
+
+            let Some(previous_power_connected) = last_power_connected else {
+                last_power_connected = Some(snapshot.power_connected);
+                info!(
+                    power_connected = snapshot.power_connected,
+                    battery_percent = snapshot.percent,
+                    "system battery monitor initialized power state"
+                );
+                continue;
+            };
+
+            if previous_power_connected != snapshot.power_connected {
+                last_power_connected = Some(snapshot.power_connected);
+                let kind = if snapshot.power_connected {
+                    "power_connected"
+                } else {
+                    "power_disconnected"
+                };
+                emit(
+                    &state,
+                    EventKind::Status,
+                    if snapshot.power_connected {
+                        "power connected"
+                    } else {
+                        "power disconnected"
+                    },
+                    json!({
+                        "event": kind,
+                        "battery_percent": snapshot.percent,
+                        "charging": snapshot.power_connected,
+                        "power_connected": snapshot.power_connected
+                    }),
+                );
+                let played_power_sound =
+                    play_optional_system_sound(kind, state.audio_playback_until_ms.clone());
+                if !played_power_sound {
+                    info!(
+                        slot = kind,
+                        "system power sound not configured; put MP3/WAV/OGG into sounds/system"
+                    );
+                }
+                if played_power_sound {
+                    tokio::time::sleep(Duration::from_millis(1_200)).await;
+                }
+                announce_battery_snapshot(&state, snapshot, "power_change");
+            }
+        }
+    });
+}
+
+fn announce_battery_status(state: &AppState) {
+    let Some(snapshot) = read_battery_snapshot() else {
+        emit(
+            state,
+            EventKind::Error,
+            "battery status unavailable",
+            json!({ "event": "battery_status_unavailable" }),
+        );
+        play_optional_system_sound("battery_unavailable", state.audio_playback_until_ms.clone());
+        return;
+    };
+    announce_battery_snapshot(state, snapshot, "voice_command");
+}
+
+fn announce_battery_snapshot(state: &AppState, snapshot: BatterySnapshot, trigger: &str) {
+    let slot = battery_sound_slot(snapshot.percent);
+    let old_bucket = legacy_battery_bucket(snapshot.percent);
+    emit(
+        state,
+        EventKind::Status,
+        "battery status requested",
+        json!({
+            "event": "battery_status",
+            "battery_percent": snapshot.percent,
+            "charging": snapshot.power_connected,
+            "power_connected": snapshot.power_connected,
+            "sound_slot": slot,
+            "legacy_bucket": old_bucket,
+            "trigger": trigger,
+            "message": format!("battery charge is {}%", snapshot.percent)
+        }),
+    );
+    let played = play_optional_system_sound(slot, state.audio_playback_until_ms.clone());
+    if !played {
+        if let Some(bucket) = old_bucket {
+            play_optional_system_sound(
+                &format!("battery_gt_{bucket}"),
+                state.audio_playback_until_ms.clone(),
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BatterySnapshot {
+    percent: u8,
+    power_connected: bool,
+}
+
+fn battery_sound_slot(percent: u8) -> &'static str {
+    match percent {
+        0..=9 => "battery_0_10",
+        10..=19 => "battery_10_20",
+        20..=29 => "battery_20_30",
+        30..=39 => "battery_30_40",
+        40..=49 => "battery_40_50",
+        50..=59 => "battery_50_60",
+        60..=69 => "battery_60_70",
+        70..=79 => "battery_70_80",
+        80..=89 => "battery_80_90",
+        90..=99 => "battery_90_100",
+        _ => "battery_100",
+    }
+}
+
+fn legacy_battery_bucket(percent: u8) -> Option<u8> {
+    if percent < 50 {
+        None
+    } else {
+        Some((percent / 10) * 10)
+    }
+}
+
+fn play_optional_system_sound(name: &str, guard: Arc<AtomicU64>) -> bool {
+    for extension in SYSTEM_SOUND_EXTENSIONS {
+        let path = PathBuf::from("sounds/system").join(format!("{name}.{extension}"));
+        if path.exists() {
+            play_configured_sound_async("system_monitor", path.to_str(), guard);
+            return true;
+        }
+    }
+    false
+}
+
+fn read_battery_snapshot() -> Option<BatterySnapshot> {
+    #[cfg(target_os = "macos")]
+    {
+        read_macos_battery_snapshot()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        read_windows_battery_snapshot()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        read_linux_battery_snapshot()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_battery_snapshot() -> Option<BatterySnapshot> {
+    let output = Command::new("pmset").args(["-g", "batt"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let percent = parse_percent(&text)?;
+    let power_connected = parse_macos_power_connected(&text);
+    Some(BatterySnapshot {
+        percent,
+        power_connected,
+    })
+}
+
+fn parse_macos_power_connected(text: &str) -> bool {
+    text.contains("AC Power")
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_battery_snapshot() -> Option<BatterySnapshot> {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "$b=Get-CimInstance Win32_Battery | Select-Object -First 1; if ($b) { \"$($b.EstimatedChargeRemaining);$($b.BatteryStatus)\" }",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut parts = text.trim().split(';');
+    let percent = parts.next()?.trim().parse::<u8>().ok()?;
+    let status = parts.next().unwrap_or_default().trim();
+    let power_connected = windows_battery_status_power_connected(status);
+    Some(BatterySnapshot {
+        percent,
+        power_connected,
+    })
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_battery_status_power_connected(status: &str) -> bool {
+    matches!(status, "2" | "3" | "6" | "7" | "8" | "9")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn read_linux_battery_snapshot() -> Option<BatterySnapshot> {
+    let battery = fs::read_dir("/sys/class/power_supply")
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            fs::read_to_string(path.join("type"))
+                .map(|kind| kind.trim() == "Battery")
+                .unwrap_or(false)
+        })?;
+    let percent = fs::read_to_string(battery.join("capacity"))
+        .ok()?
+        .trim()
+        .parse::<u8>()
+        .ok()?;
+    let status = fs::read_to_string(battery.join("status")).unwrap_or_default();
+    let power_connected = read_linux_power_connected()
+        .unwrap_or_else(|| status.contains("Charging") || status.contains("Full"));
+    Some(BatterySnapshot {
+        percent,
+        power_connected,
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn read_linux_power_connected() -> Option<bool> {
+    let supplies = fs::read_dir("/sys/class/power_supply").ok()?;
+    for entry in supplies.flatten() {
+        let path = entry.path();
+        let kind = fs::read_to_string(path.join("type")).unwrap_or_default();
+        if !matches!(kind.trim(), "Mains" | "USB" | "USB_C" | "USB_PD") {
+            continue;
+        }
+        let online = fs::read_to_string(path.join("online")).unwrap_or_default();
+        if online.trim() == "1" {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+fn parse_percent(text: &str) -> Option<u8> {
+    let percent_index = text.find('%')?;
+    let start = text[..percent_index]
+        .rfind(|ch: char| !ch.is_ascii_digit())
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    text[start..percent_index].parse::<u8>().ok()
+}
+
 #[cfg(all(feature = "live-audio", feature = "vosk-stt"))]
 fn capture_live_transcript(
     config: &ErezConfig,
@@ -642,6 +1386,7 @@ fn drain_audio_playback(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn play_wake_feedback_sounds(wake: Option<&str>, listening: Option<&str>, guard: &AtomicU64) {
     let wake = non_empty_sound(wake);
     let listening = non_empty_sound(listening);
@@ -656,6 +1401,7 @@ fn play_wake_feedback_sounds(wake: Option<&str>, listening: Option<&str>, guard:
     }
 }
 
+#[allow(dead_code)]
 fn non_empty_sound(file: Option<&str>) -> Option<&str> {
     file.map(str::trim).filter(|file| !file.is_empty())
 }
@@ -834,6 +1580,7 @@ async fn process_intent_result(
                                     "scenario step executed",
                                     serde_json::to_value(step).unwrap_or(Value::Null),
                                 );
+                                handle_system_step_effects(state, step);
                             }
                             emit(
                                 &state,
@@ -879,6 +1626,7 @@ async fn process_intent_result(
                                 "action executed",
                                 serde_json::to_value(outcome).unwrap_or(Value::Null),
                             );
+                            handle_system_action_effects(state, &action);
                         }
                         Err(err) => {
                             if matches!(action, Action::PlaySound { .. } | Action::SaySound { .. })
@@ -960,6 +1708,20 @@ async fn handle_system_scenario_effects(state: &AppState, scenario_id: &str) {
     }
 }
 
+fn handle_system_action_effects(state: &AppState, action: &Action) {
+    if let Action::EmitEvent { event, .. } = action {
+        if event == "battery_status_requested" {
+            announce_battery_status(state);
+        }
+    }
+}
+
+fn handle_system_step_effects(state: &AppState, step: &erez_core::scenario::ScenarioStepResult) {
+    if step.success && step.message.contains("`battery_status_requested`") {
+        announce_battery_status(state);
+    }
+}
+
 async fn events_sse(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -1016,13 +1778,439 @@ async fn events_ws_socket(socket: WebSocket, state: AppState) {
 
 fn load_registry(config: &ErezConfig) -> PluginRegistry {
     let mut manifests = Vec::new();
-    for dir in &config.plugin_dirs {
-        match PluginRegistry::load_dir(dir) {
+    for dir in effective_plugin_dirs(config) {
+        match PluginRegistry::load_dir(&dir) {
             Ok(registry) => manifests.extend_from_slice(registry.manifests()),
             Err(err) => error!("failed to load plugins from {}: {err}", dir.display()),
         }
     }
     PluginRegistry::from_manifests(manifests)
+}
+
+async fn reload_registry(state: &AppState) -> usize {
+    let config = state.config.read().await.clone();
+    let registry = load_registry(&config);
+    let count = registry.manifests().len();
+    *state.registry.write().await = registry;
+    emit(
+        state,
+        EventKind::Status,
+        "commands reloaded",
+        json!({ "plugin_count": count }),
+    );
+    count
+}
+
+fn collect_scenario_summaries(config: &ErezConfig) -> Vec<ScenarioSummary> {
+    let mut summaries = Vec::new();
+    for dir in effective_plugin_dirs(config) {
+        collect_scenario_summaries_from_dir(&dir, &mut summaries);
+    }
+    summaries.sort_by(|a, b| a.id.cmp(&b.id));
+    summaries
+}
+
+fn collect_scenario_summaries_from_dir(dir: &Path, summaries: &mut Vec<ScenarioSummary>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_scenario_summaries_from_dir(&path, summaries);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+            continue;
+        }
+        let Ok(manifest) = PluginRegistry::load_manifest(&path) else {
+            continue;
+        };
+        let readonly = !is_user_manifest_path(&path);
+        for scenario in manifest.scenarios {
+            summaries.push(ScenarioSummary {
+                id: scenario.id,
+                manifest_id: manifest.id.clone(),
+                manifest_name: manifest.name.clone(),
+                aliases: scenario.aliases,
+                patterns: scenario.patterns,
+                priority: scenario.priority,
+                step_count: scenario.steps.len(),
+                readonly,
+                path: path.display().to_string(),
+            });
+        }
+    }
+}
+
+fn find_scenario_document(
+    config: &ErezConfig,
+    id: &str,
+) -> anyhow::Result<Option<(ScenarioDocument, bool, PathBuf)>> {
+    for dir in effective_plugin_dirs(config) {
+        if let Some(found) = find_scenario_document_in_dir(&dir, id)? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
+fn find_scenario_document_in_dir(
+    dir: &Path,
+    id: &str,
+) -> anyhow::Result<Option<(ScenarioDocument, bool, PathBuf)>> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(None);
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.is_dir() {
+            if let Some(found) = find_scenario_document_in_dir(&path, id)? {
+                return Ok(Some(found));
+            }
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+            continue;
+        }
+        let manifest = PluginRegistry::load_manifest(&path)?;
+        if let Some(scenario) = manifest
+            .scenarios
+            .iter()
+            .find(|scenario| scenario.id == id)
+            .cloned()
+        {
+            let readonly = !is_user_manifest_path(&path);
+            return Ok(Some((
+                ScenarioDocument {
+                    manifest_id: manifest.id,
+                    manifest_name: manifest.name,
+                    enabled: manifest.enabled,
+                    scenario,
+                },
+                readonly,
+                path,
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn validate_scenario_document(
+    document: &ScenarioDocument,
+    config: &ErezConfig,
+    current_id: Option<&str>,
+) -> ValidationResponse {
+    let mut errors = Vec::new();
+    let id = document.scenario.id.trim();
+    if id.is_empty() {
+        errors.push("scenario id is required".into());
+    }
+    if !is_safe_id(id) {
+        errors.push("scenario id can contain only letters, numbers, `_` and `-`".into());
+    }
+    if document.scenario.aliases.is_empty() && document.scenario.patterns.is_empty() {
+        errors.push("add at least one alias or pattern".into());
+    }
+    if document.scenario.steps.is_empty() {
+        errors.push("add at least one step".into());
+    }
+
+    let mut step_ids = HashSet::new();
+    for step in &document.scenario.steps {
+        if step.id.trim().is_empty() {
+            errors.push("step id is required".into());
+        }
+        if !step_ids.insert(step.id.clone()) {
+            errors.push(format!("duplicate step id `{}`", step.id));
+        }
+    }
+    for step in &document.scenario.steps {
+        for target in [step.on_success.as_ref(), step.on_error.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if !step_ids.contains(target) {
+                errors.push(format!(
+                    "step `{}` points to missing branch target `{target}`",
+                    step.id
+                ));
+            }
+        }
+        validate_action_for_ui(&step.action, &mut errors);
+        validate_sound_ref(step.before_sound.as_deref(), &mut errors);
+        validate_sound_ref(step.after_sound.as_deref(), &mut errors);
+    }
+
+    for summary in collect_scenario_summaries(config) {
+        if Some(summary.id.as_str()) != current_id && summary.id == id {
+            errors.push(format!("scenario id `{id}` already exists"));
+        }
+    }
+
+    ValidationResponse {
+        ok: errors.is_empty(),
+        errors,
+    }
+}
+
+fn validate_action_for_ui(action: &Action, errors: &mut Vec<String>) {
+    match action {
+        Action::OpenApp { app } if app.trim().is_empty() => {
+            errors.push("open_app requires app".into())
+        }
+        Action::SetVolume { level, delta } if level.is_none() && delta.is_none() => {
+            errors.push("set_volume requires level or delta".into())
+        }
+        Action::PlaySound { file } | Action::SaySound { file } => {
+            validate_sound_ref(Some(file), errors);
+        }
+        Action::Ask { sound, reply_slot } => {
+            if reply_slot.trim().is_empty() {
+                errors.push("ask requires reply_slot".into());
+            }
+            validate_sound_ref(sound.as_deref(), errors);
+        }
+        Action::WaitForReply { reply_slot } if reply_slot.trim().is_empty() => {
+            errors.push("wait_for_reply requires reply_slot".into())
+        }
+        Action::Shell { command, .. } if command.trim().is_empty() => {
+            errors.push("shell requires command".into())
+        }
+        Action::Hotkey { keys } if keys.is_empty() => errors.push("hotkey requires keys".into()),
+        Action::Url { url } if !(url.starts_with("http://") || url.starts_with("https://")) => {
+            errors.push("url must start with http:// or https://".into())
+        }
+        Action::HttpRequest { method, url, .. } => {
+            if method.trim().is_empty() {
+                errors.push("http_request requires method".into());
+            }
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                errors.push("http_request url must start with http:// or https://".into());
+            }
+        }
+        Action::EmitEvent { event, .. } if event.trim().is_empty() => {
+            errors.push("emit_event requires event".into())
+        }
+        _ => {}
+    }
+}
+
+fn validate_sound_ref(sound: Option<&str>, errors: &mut Vec<String>) {
+    let Some(sound) = sound else {
+        return;
+    };
+    if sound.trim().is_empty() {
+        errors.push("sound path cannot be empty".into());
+        return;
+    }
+    let extension = Path::new(sound)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "mp3" | "wav" | "ogg") {
+        errors.push(format!("sound `{sound}` must be MP3, WAV or OGG"));
+    }
+}
+
+fn write_user_scenario(document: &ScenarioDocument, overwrite: bool) -> anyhow::Result<PathBuf> {
+    let dir = user_scenario_dir(&document.scenario.id);
+    let path = dir.join("scenario.toml");
+    if path.exists() && !overwrite {
+        anyhow::bail!("scenario already exists");
+    }
+    fs::create_dir_all(&dir)?;
+    let manifest = PluginManifest {
+        id: user_manifest_id(&document.scenario.id),
+        name: if document.manifest_name.trim().is_empty() {
+            format!("{} scenario", document.scenario.id)
+        } else {
+            document.manifest_name.clone()
+        },
+        enabled: document.enabled,
+        commands: Vec::new(),
+        scenarios: vec![document.scenario.clone()],
+    };
+    fs::write(&path, toml::to_string_pretty(&manifest)?)?;
+    Ok(path)
+}
+
+fn scenario_is_readonly(config: &ErezConfig, id: &str) -> bool {
+    find_scenario_document(config, id)
+        .ok()
+        .flatten()
+        .map(|(_, readonly, _)| readonly)
+        .unwrap_or(false)
+}
+
+fn effective_plugin_dirs(config: &ErezConfig) -> Vec<PathBuf> {
+    let mut dirs = config.plugin_dirs.clone();
+    let user = user_plugin_root();
+    if !dirs.iter().any(|dir| dir == &user) {
+        dirs.push(user);
+    }
+    dirs
+}
+
+fn user_scenario_dir(id: &str) -> PathBuf {
+    user_plugin_root().join("scenarios").join(id)
+}
+
+fn user_plugin_root() -> PathBuf {
+    std::env::var_os("KOMP_USER_PLUGIN_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_USER_PLUGIN_ROOT))
+}
+
+fn user_manifest_id(id: &str) -> String {
+    format!("user_{id}")
+}
+
+fn is_user_manifest_path(path: &Path) -> bool {
+    path.starts_with(user_plugin_root())
+}
+
+fn is_safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn sanitize_sound_file_name(file_name: &str) -> String {
+    Path::new(file_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn scan_installed_apps() -> Vec<AppInfo> {
+    let mut apps = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        scan_macos_apps(Path::new("/Applications"), &mut apps);
+        if let Some(home) = std::env::var_os("HOME") {
+            scan_macos_apps(&PathBuf::from(home).join("Applications"), &mut apps);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        for dir in [
+            std::env::var_os("APPDATA")
+                .map(PathBuf::from)
+                .map(|path| path.join("Microsoft/Windows/Start Menu/Programs")),
+            std::env::var_os("PROGRAMDATA")
+                .map(PathBuf::from)
+                .map(|path| path.join("Microsoft/Windows/Start Menu/Programs")),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            scan_windows_shortcuts(&dir, &mut apps);
+        }
+    }
+    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    apps.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
+    apps
+}
+
+fn find_logo_path() -> Option<PathBuf> {
+    let candidates = [
+        "logo.png",
+        "logo.svg",
+        "logo.jpg",
+        "logo.jpeg",
+        "logo.webp",
+        "komp-logo.png",
+        "komp-logo.svg",
+        "komp-logo.jpg",
+        "komp-logo.jpeg",
+        "komp-logo.webp",
+    ];
+    if let Some(path) = candidates
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| path.exists())
+    {
+        return Some(path);
+    }
+
+    fs::read_dir(".")
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.is_file()
+                && matches!(
+                    path.extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext.to_ascii_lowercase())
+                        .as_deref(),
+                    Some("png" | "svg" | "jpg" | "jpeg" | "webp")
+                )
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn scan_macos_apps(dir: &Path, apps: &mut Vec<AppInfo>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("app") {
+            let name = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if !name.is_empty() {
+                apps.push(AppInfo {
+                    name,
+                    path: Some(path.display().to_string()),
+                    source: "macos_app_bundle".into(),
+                });
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn scan_windows_shortcuts(dir: &Path, apps: &mut Vec<AppInfo>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            scan_windows_shortcuts(&path, apps);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) == Some("lnk") {
+            let name = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if !name.is_empty() {
+                apps.push(AppInfo {
+                    name,
+                    path: Some(path.display().to_string()),
+                    source: "windows_start_menu".into(),
+                });
+            }
+        }
+    }
 }
 
 fn emit(
@@ -1049,8 +2237,13 @@ mod tests {
         body::{to_bytes, Body},
         http::{header, Method, Request},
     };
-    use std::fs;
+    use std::{fs, sync::OnceLock};
     use tower::ServiceExt;
+
+    fn env_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
 
     fn test_state(config: ErezConfig) -> AppState {
         let registry = load_registry(&config);
@@ -1087,6 +2280,29 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         assert_eq!(body["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn config_get_returns_lmstudio_settings() {
+        let mut config = ErezConfig::default();
+        config.lmstudio.enabled = false;
+        config.lmstudio.base_url = "http://localhost:1234/v1".into();
+        let app = build_router(test_state(config));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["lmstudio"]["enabled"], false);
+        assert_eq!(body["lmstudio"]["base_url"], "http://localhost:1234/v1");
     }
 
     #[tokio::test]
@@ -1296,6 +2512,268 @@ action = { type = "emit_event", event = "safari", payload = {} }
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         assert_eq!(body["resolved"]["source"], "scenario");
+    }
+
+    #[test]
+    fn battery_sound_slot_covers_all_decade_ranges() {
+        assert_eq!(battery_sound_slot(0), "battery_0_10");
+        assert_eq!(battery_sound_slot(9), "battery_0_10");
+        assert_eq!(battery_sound_slot(10), "battery_10_20");
+        assert_eq!(battery_sound_slot(49), "battery_40_50");
+        assert_eq!(battery_sound_slot(50), "battery_50_60");
+        assert_eq!(battery_sound_slot(59), "battery_50_60");
+        assert_eq!(battery_sound_slot(60), "battery_60_70");
+        assert_eq!(battery_sound_slot(99), "battery_90_100");
+        assert_eq!(battery_sound_slot(100), "battery_100");
+    }
+
+    #[test]
+    fn legacy_battery_bucket_keeps_old_sound_names_as_fallback() {
+        assert_eq!(legacy_battery_bucket(49), None);
+        assert_eq!(legacy_battery_bucket(50), Some(50));
+        assert_eq!(legacy_battery_bucket(59), Some(50));
+        assert_eq!(legacy_battery_bucket(60), Some(60));
+        assert_eq!(legacy_battery_bucket(100), Some(100));
+    }
+
+    #[test]
+    fn parse_percent_finds_pmset_style_percent() {
+        assert_eq!(
+            parse_percent("Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1234567)\t58%; discharging;"),
+            Some(58)
+        );
+    }
+
+    #[test]
+    fn macos_power_parser_tracks_cable_not_charge_verb() {
+        assert!(parse_macos_power_connected(
+            "Now drawing from 'AC Power'\n -InternalBattery-0\t100%; charged;"
+        ));
+        assert!(!parse_macos_power_connected(
+            "Now drawing from 'Battery Power'\n -InternalBattery-0\t58%; discharging;"
+        ));
+    }
+
+    #[test]
+    fn windows_power_parser_tracks_online_statuses() {
+        assert!(!windows_battery_status_power_connected("1"));
+        assert!(windows_battery_status_power_connected("2"));
+        assert!(windows_battery_status_power_connected("3"));
+        assert!(windows_battery_status_power_connected("6"));
+        assert!(!windows_battery_status_power_connected("4"));
+        assert!(!windows_battery_status_power_connected("5"));
+    }
+
+    #[tokio::test]
+    async fn scenarios_api_creates_updates_and_deletes_user_scenario() {
+        let _guard = env_lock().lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("KOMP_USER_PLUGIN_DIR", dir.path().join("plugins.user"));
+
+        let mut config = ErezConfig::default();
+        config.plugin_dirs = vec![dir.path().join("plugins.example")];
+        config.lmstudio.enabled = false;
+        let app = build_router(test_state(config));
+        let document = json!({
+            "manifest_id": "user_open_discord",
+            "manifest_name": "Open Discord",
+            "enabled": true,
+            "scenario": {
+                "id": "open_discord",
+                "aliases": ["открыть дискорд", "запусти discord"],
+                "patterns": [],
+                "priority": 20,
+                "sounds": {},
+                "steps": [
+                    { "id": "open", "action": { "type": "open_app", "app": "Discord" } }
+                ]
+            }
+        });
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/scenarios")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&document).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert!(dir
+            .path()
+            .join("plugins.user/scenarios/open_discord/scenario.toml")
+            .exists());
+
+        let mut updated = document.clone();
+        updated["scenario"]["aliases"] = json!(["открой дискорд"]);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/scenarios/open_discord")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&updated).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let content = fs::read_to_string(
+            dir.path()
+                .join("plugins.user/scenarios/open_discord/scenario.toml"),
+        )
+        .unwrap();
+        assert!(content.contains("открой дискорд"));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/scenarios/open_discord")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!dir
+            .path()
+            .join("plugins.user/scenarios/open_discord")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn scenarios_api_rejects_system_update_and_uploads_sound() {
+        let _guard = env_lock().lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("KOMP_USER_PLUGIN_DIR", dir.path().join("plugins.user"));
+        let system_dir = dir.path().join("plugins.example/scenarios/system");
+        fs::create_dir_all(&system_dir).unwrap();
+        fs::write(
+            system_dir.join("scenario.toml"),
+            r#"
+id = "system_test"
+name = "System Test"
+enabled = true
+
+[[scenarios]]
+id = "system_test"
+aliases = ["system test"]
+
+[[scenarios.steps]]
+id = "emit"
+action = { type = "emit_event", event = "system_test", payload = {} }
+"#,
+        )
+        .unwrap();
+
+        let mut config = ErezConfig::default();
+        config.plugin_dirs = vec![dir.path().join("plugins.example")];
+        config.lmstudio.enabled = false;
+        let app = build_router(test_state(config));
+        let document = json!({
+            "manifest_id": "system_test",
+            "manifest_name": "System Test",
+            "enabled": true,
+            "scenario": {
+                "id": "system_test",
+                "aliases": ["system test"],
+                "patterns": [],
+                "priority": 0,
+                "sounds": {},
+                "steps": [
+                    { "id": "emit", "action": { "type": "emit_event", "event": "system_test", "payload": {} } }
+                ]
+            }
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/scenarios/system_test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&document).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/scenarios/open_discord/sounds")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"file_name":"ok.mp3","data_base64":"a29tcA=="}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(dir
+            .path()
+            .join("plugins.user/scenarios/open_discord/sounds/ok.mp3")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn listen_once_resolves_user_scenario_from_plugins_user() {
+        let _guard = env_lock().lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let user_root = dir.path().join("plugins.user");
+        std::env::set_var("KOMP_USER_PLUGIN_DIR", &user_root);
+        let scenario_dir = user_root.join("scenarios/user_voice_test");
+        fs::create_dir_all(&scenario_dir).unwrap();
+        fs::write(
+            scenario_dir.join("scenario.toml"),
+            r#"
+id = "user_voice_test_manifest"
+name = "User Voice Test"
+enabled = true
+
+[[scenarios]]
+id = "user_voice_test"
+aliases = ["пользовательский тест"]
+priority = 80
+
+[[scenarios.steps]]
+id = "emit"
+action = { type = "emit_event", event = "user_voice_test", payload = {} }
+"#,
+        )
+        .unwrap();
+
+        let mut config = ErezConfig::default();
+        config.plugin_dirs = vec![dir.path().join("plugins.example")];
+        config.lmstudio.enabled = false;
+        let app = build_router(test_state(config));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/listen/once")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"transcript":"пользовательский тест"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["resolved"]["source"], "scenario");
+        assert_eq!(body["resolved"]["plugin_id"], "user_voice_test_manifest");
+        assert_eq!(body["resolved"]["command_id"], "user_voice_test");
     }
 
     #[tokio::test]
