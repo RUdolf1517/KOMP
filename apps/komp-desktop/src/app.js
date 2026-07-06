@@ -35,7 +35,7 @@ const batteryStatusSoundSlots = [
   ["battery_unavailable", "Не удалось узнать заряд"],
   ...batterySoundSlots
 ];
-const state = { view: "scenarios", scenarios: [], selected: null, document: null, apps: [], status: "", errors: [], run: null, systemSounds: {}, config: null, lmStudioStatus: null };
+const state = { view: "scenarios", scenarios: [], selected: null, document: null, apps: [], status: "", errors: [], run: null, systemSounds: {}, systemSoundRoot: "", config: null, lmStudioStatus: null };
 
 const $ = (sel) => document.querySelector(sel);
 const el = (tag, attrs = {}, children = []) => {
@@ -98,7 +98,7 @@ function emptyDoc() {
 async function boot() {
   renderShell();
   setStatus("Подключение к KOMP daemon...");
-  await Promise.all([loadScenarios(), loadApps(), loadLogo(), loadConfig()]);
+  await Promise.all([loadScenarios(), loadApps(), loadLogo(), loadConfig(), loadSystemSounds()]);
 }
 
 async function loadScenarios() {
@@ -121,6 +121,15 @@ async function loadApps() {
 
 async function loadConfig() {
   try { state.config = await api("/config"); render(); } catch (_) {}
+}
+
+async function loadSystemSounds() {
+  try {
+    const result = await api("/system-sounds");
+    state.systemSounds = Object.fromEntries((result.sounds || []).map(sound => [sound.slot, sound]));
+    state.systemSoundRoot = result.root || "";
+    render();
+  } catch (_) {}
 }
 
 async function loadLogo() {
@@ -159,8 +168,6 @@ function renderShell() {
         el("div", { class: "brand" }, [el("div", { class: "logo" }, ["K"]), el("div", {}, ["KOMP"])]),
         el("div", { class: "toolbar" }, [
           el("button", { class: "btn primary", onClick: newScenario }, ["Новый сценарий"]),
-          el("button", { class: "btn", onClick: openSoundSettings }, ["Озвучка"]),
-          el("button", { class: "btn", onClick: openLmStudioSettings }, ["LM Studio"]),
           el("button", { class: "btn", onClick: loadScenarios }, ["Обновить"])
         ]),
         el("input", { class: "search", placeholder: "Поиск сценариев", onInput: render }),
@@ -215,7 +222,7 @@ function renderTopActions() {
   const box = $("#topActions");
   if (!box) return;
   if (state.view === "sounds") {
-    box.replaceChildren(el("button", { class: "btn", onClick: loadScenarios }, ["Обновить"]));
+    box.replaceChildren(el("button", { class: "btn", onClick: loadSystemSounds }, ["Обновить"]));
     return;
   }
   if (state.view === "lmstudio") {
@@ -286,16 +293,16 @@ function renderSoundSettings() {
     el("div", {}, [
       panel("Системная озвучка", [
         help("Эти звуки не относятся к сценариям. KOMP проигрывает их сам, когда меняется питание ноутбука."),
-        el("div", { class: "form-grid two" }, powerSoundSlots.map(([slot, label]) => systemSoundField(label, slot)))
+        el("div", { class: "sound-grid two" }, powerSoundSlots.map(([slot, label]) => systemSoundCard(label, slot)))
       ]),
       panel("Озвучка уровня батареи", [
-        help("Эти фразы проигрываются только по команде проверки заряда, например “сколько зарядки”."),
-        el("div", { class: "form-grid" }, batteryStatusSoundSlots.map(([slot, label]) => systemSoundField(label, slot)))
+        help("Эти фразы проигрываются по команде проверки заряда и после подключения или отключения зарядки."),
+        el("div", { class: "sound-grid" }, batteryStatusSoundSlots.map(([slot, label]) => systemSoundCard(label, slot)))
       ])
     ]),
     el("div", {}, [
       panel("Где лежат файлы", [
-        help("Загруженные файлы сохраняются в sounds/system. Подключение и отключение зарядки мониторятся постоянно, пока daemon запущен.")
+        help(`Daemon читает и сохраняет системную озвучку здесь: ${state.systemSoundRoot || "sounds/system"}.`)
       ])
     ])
   ]));
@@ -407,15 +414,25 @@ function soundField(labelText, target, key, disabled) {
     ])
   ]));
 }
-function systemSoundField(labelText, slot) {
-  return field(labelText, el("div", { class: "sound-row" }, [
-    input(state.systemSounds[slot] || "", v => state.systemSounds[slot] = v, false, "text", `sounds/system/${slot}.mp3`),
-    el("label", { class: "btn file-button" }, [
-      "Загрузить",
+function systemSoundCard(labelText, slot) {
+  const sound = state.systemSounds[slot] || {};
+  const exists = !!sound.exists;
+  return el("div", { class: `sound-card ${exists ? "ready" : ""}` }, [
+    el("div", { class: "sound-card-head" }, [
+      el("div", {}, [
+        el("div", { class: "sound-title" }, [labelText]),
+        el("div", { class: "sound-slot" }, [slot])
+      ]),
+      el("span", { class: `sound-badge ${exists ? "ready" : ""}` }, [exists ? "Загружено" : "Нет файла"])
+    ]),
+    el("div", { class: "sound-file" }, [exists ? compactSoundPath(sound.file) : "MP3, WAV или OGG"]),
+    el("label", { class: "btn file-button sound-upload" }, [
+      exists ? "Заменить" : "Загрузить",
       el("input", { type: "file", accept: ".mp3,.wav,.ogg,audio/mpeg,audio/wav,audio/ogg", onChange: e => uploadSystemSound(e.target.files?.[0], slot) })
     ])
-  ]));
+  ]);
 }
+function compactSoundPath(file) { return String(file || "").split(/[\\/]/).slice(-2).join("/"); }
 function input(value, onChange, disabled, type = "text", placeholder = "") { return el("input", { type, value: value ?? "", placeholder, disabled, onInput: e => { onChange(e.target.value); renderChrome(); } }); }
 function select(options, value, onChange, disabled, rerender = false, labels = {}) { const s = el("select", { disabled, onChange: e => { onChange(e.target.value); rerender ? render() : renderChrome(); } }, options.map(o => el("option", { value: o }, [labels[o] || o || "—"]))); s.value = value ?? ""; return s; }
 function safeId(v) { return String(v).trim().replace(/\s+/g, "_").replace(/[^\w-]/g, ""); }
@@ -537,8 +554,9 @@ async function uploadSystemSound(file, slot) {
       method: "POST",
       body: JSON.stringify({ file_name: file.name, data_base64 })
     });
-    state.systemSounds[slot] = result.file;
-    setStatus("Озвучка батареи загружена");
+    state.systemSounds[slot] = { slot, exists: true, file: result.file };
+    setStatus("Системная озвучка загружена");
+    await loadSystemSounds();
   } catch (e) {
     const message = uploadErrorMessage(e);
     state.errors = [message];

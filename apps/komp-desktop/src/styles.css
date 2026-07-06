@@ -22,7 +22,8 @@ button, input, textarea, select { font: inherit; }
 .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; font-weight: 700; letter-spacing: .08em; }
 .logo { width: 32px; height: 32px; border-radius: 8px; background: var(--blue-2); display: grid; place-items: center; }
 .logo img { width: 100%; height: 100%; object-fit: contain; border-radius: 8px; }
-.toolbar { display: flex; gap: 8px; margin-bottom: 14px; }
+.toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-bottom: 14px; }
+.toolbar .btn { min-width: 0; }
 .search { width: 100%; margin-bottom: 12px; }
 .list { display: grid; gap: 8px; }
 .scenario-item { width: 100%; text-align: left; padding: 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); cursor: pointer; }
@@ -69,11 +70,21 @@ input:focus, textarea:focus, select:focus { border-color: var(--blue); }
 .sound-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
 .file-button { position: relative; overflow: hidden; }
 .file-button input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.sound-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.sound-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.sound-card { border: 1px solid var(--line); border-radius: 8px; background: #081525; padding: 10px; display: grid; gap: 9px; min-width: 0; }
+.sound-card.ready { border-color: #2f6f5f; }
+.sound-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; min-width: 0; }
+.sound-title { color: var(--text); font-weight: 650; font-size: 13px; }
+.sound-slot, .sound-file { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sound-badge { border: 1px solid var(--line); border-radius: 999px; padding: 3px 7px; color: var(--muted); font-size: 11px; flex: 0 0 auto; }
+.sound-badge.ready { border-color: #2f6f5f; color: var(--ok); }
+.sound-upload { text-align: center; }
 .readonly { color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; font-size: 12px; }
 .ok { color: var(--ok); }
 
 @media (max-width: 980px) {
   .shell { grid-template-columns: 1fr; }
   .sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
-  .grid, .form-grid, .action-fields, .conditions, .branches { grid-template-columns: 1fr; }
+  .grid, .form-grid, .sound-grid, .action-fields, .conditions, .branches { grid-template-columns: 1fr; }
 }

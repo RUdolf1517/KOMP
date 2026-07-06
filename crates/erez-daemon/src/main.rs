@@ -236,6 +236,7 @@ fn build_router(state: AppState) -> Router {
         .route("/scenarios/:id/validate", post(scenarios_validate))
         .route("/scenarios/:id/dry-run", post(scenarios_dry_run))
         .route("/scenarios/:id/sounds", post(scenarios_sound_upload))
+        .route("/system-sounds", get(system_sounds_list))
         .route("/system-sounds/:slot", post(system_sound_upload))
         .route("/apps", get(apps_list))
         .route("/logo", get(logo_get))
@@ -578,7 +579,7 @@ async fn system_sound_upload(
             )
         }
     };
-    let root = PathBuf::from("sounds/system");
+    let root = system_sound_root();
     if let Err(err) = fs::create_dir_all(&root) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -601,6 +602,22 @@ async fn system_sound_upload(
             Json(json!({ "error": err.to_string() })),
         ),
     }
+}
+
+async fn system_sounds_list() -> impl IntoResponse {
+    let root = system_sound_root();
+    let sounds = SYSTEM_SOUND_SLOTS
+        .iter()
+        .map(|slot| {
+            let file = find_system_sound_path(slot).map(|path| path.display().to_string());
+            json!({
+                "slot": slot,
+                "exists": file.is_some(),
+                "file": file
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(json!({ "root": root.display().to_string(), "sounds": sounds }))
 }
 
 async fn apps_list() -> impl IntoResponse {
@@ -1080,14 +1097,18 @@ fn legacy_battery_bucket(percent: u8) -> Option<u8> {
 }
 
 fn play_optional_system_sound(name: &str, guard: Arc<AtomicU64>) -> bool {
-    for extension in SYSTEM_SOUND_EXTENSIONS {
-        let path = PathBuf::from("sounds/system").join(format!("{name}.{extension}"));
-        if path.exists() {
-            play_configured_sound_async("system_monitor", path.to_str(), guard);
-            return true;
-        }
+    if let Some(path) = find_system_sound_path(name) {
+        play_configured_sound_async("system_monitor", path.to_str(), guard);
+        return true;
     }
     false
+}
+
+fn find_system_sound_path(name: &str) -> Option<PathBuf> {
+    SYSTEM_SOUND_EXTENSIONS
+        .iter()
+        .map(|extension| system_sound_root().join(format!("{name}.{extension}")))
+        .find(|path| path.exists())
 }
 
 fn read_battery_snapshot() -> Option<BatterySnapshot> {
@@ -2045,7 +2066,11 @@ fn scenario_is_readonly(config: &ErezConfig, id: &str) -> bool {
 }
 
 fn effective_plugin_dirs(config: &ErezConfig) -> Vec<PathBuf> {
-    let mut dirs = config.plugin_dirs.clone();
+    let mut dirs = config
+        .plugin_dirs
+        .iter()
+        .map(|dir| resolve_project_path(dir))
+        .collect::<Vec<_>>();
     let user = user_plugin_root();
     if !dirs.iter().any(|dir| dir == &user) {
         dirs.push(user);
@@ -2060,7 +2085,35 @@ fn user_scenario_dir(id: &str) -> PathBuf {
 fn user_plugin_root() -> PathBuf {
     std::env::var_os("KOMP_USER_PLUGIN_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_USER_PLUGIN_ROOT))
+        .map(|path| resolve_project_path(&path))
+        .unwrap_or_else(|| project_root().join(DEFAULT_USER_PLUGIN_ROOT))
+}
+
+fn system_sound_root() -> PathBuf {
+    std::env::var_os("KOMP_SYSTEM_SOUND_DIR")
+        .map(PathBuf::from)
+        .map(|path| resolve_project_path(&path))
+        .unwrap_or_else(|| project_root().join("sounds/system"))
+}
+
+fn project_root() -> PathBuf {
+    std::env::var_os("KOMP_PROJECT_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        })
+}
+
+fn resolve_project_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root().join(path)
+    }
 }
 
 fn user_manifest_id(id: &str) -> String {
@@ -2303,6 +2356,40 @@ mod tests {
         let body = json_body(response).await;
         assert_eq!(body["lmstudio"]["enabled"], false);
         assert_eq!(body["lmstudio"]["base_url"], "http://localhost:1234/v1");
+    }
+
+    #[tokio::test]
+    async fn system_sounds_lists_existing_files() {
+        let _guard = env_lock().lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("KOMP_SYSTEM_SOUND_DIR", dir.path());
+        fs::write(dir.path().join("power_connected.mp3"), b"komp").unwrap();
+        let app = build_router(test_state(ErezConfig::default()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/system-sounds")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let sounds = body["sounds"].as_array().unwrap();
+        let power_connected = sounds
+            .iter()
+            .find(|sound| sound["slot"] == "power_connected")
+            .unwrap();
+        assert_eq!(power_connected["exists"], true);
+        assert!(power_connected["file"]
+            .as_str()
+            .unwrap()
+            .ends_with("power_connected.mp3"));
+        std::env::remove_var("KOMP_SYSTEM_SOUND_DIR");
     }
 
     #[tokio::test]
