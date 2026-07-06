@@ -1,0 +1,49 @@
+id = "system"
+name = "System commands"
+enabled = true
+
+[[commands]]
+id = "open_browser"
+aliases = [
+  "открой браузер",
+  "браузер",
+  "запусти браузер",
+  "включи браузер",
+  "открой броуди",
+  "open browser"
+]
+patterns = []
+
+[commands.action]
+type = "open_app"
+app = "browser"
+
+[[commands]]
+id = "search_web"
+aliases = []
+patterns = ["^найди (?P<query>.+)$", "^search (?P<query>.+)$"]
+
+[commands.action]
+type = "url"
+url = "https://www.google.com/search?q={{query}}"
+
+[[commands]]
+id = "safe_shell_example"
+aliases = ["скажи привет в терминале"]
+patterns = []
+
+[commands.action]
+type = "shell"
+command = "echo"
+args = ["hello"]
+enabled = false
+
+[[commands]]
+id = "lights_on"
+aliases = ["включи свет", "turn lights on"]
+patterns = []
+
+[commands.action]
+type = "emit_event"
+event = "lights_on"
+payload = {}

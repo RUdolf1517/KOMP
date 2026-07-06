@@ -1,0 +1,9 @@
+target/
+.DS_Store
+*.log
+*.tmp
+
+# Local runtime config can contain absolute model paths.
+erez.toml
+komp.toml
+

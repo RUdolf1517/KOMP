@@ -1,0 +1,16 @@
+id = "system_shutdown"
+name = "System shutdown scenario"
+enabled = true
+
+[[scenarios]]
+id = "shutdown_komp"
+aliases = ["выключись", "завершить работу", "комп выключись", "shutdown", "stop listening"]
+priority = 60
+
+[[scenarios.steps]]
+id = "announce"
+action = { type = "play_sound", file = "sounds/system/shutdown.mp3" }
+
+[[scenarios.steps]]
+id = "emit"
+action = { type = "emit_event", event = "komp_shutdown_requested", payload = {} }

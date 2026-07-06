@@ -1,0 +1,30 @@
+[package]
+name = "erez-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+cpal = { workspace = true, optional = true }
+hound.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+rodio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+vosk = { workspace = true, optional = true }
+
+[features]
+default = []
+audio-cpal = ["cpal"]
+vosk-stt = ["vosk"]
+
+[dev-dependencies]
+tempfile.workspace = true

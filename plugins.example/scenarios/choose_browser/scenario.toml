@@ -1,0 +1,22 @@
+id = "choose_browser"
+name = "Choose browser scenario"
+enabled = true
+
+[[scenarios]]
+id = "choose_browser"
+aliases = ["открой браузер какой", "choose browser"]
+priority = 30
+
+[[scenarios.steps]]
+id = "ask_browser"
+action = { type = "ask", sound = "sounds/system/listening.mp3", reply_slot = "browser" }
+
+[[scenarios.steps]]
+id = "open_chrome"
+when = { slot = "browser", contains = "chrome" }
+action = { type = "open_app", app = "Google Chrome" }
+
+[[scenarios.steps]]
+id = "open_safari"
+when = { slot = "browser", contains = "safari" }
+action = { type = "open_app", app = "Safari" }

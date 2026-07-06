@@ -1,0 +1,28 @@
+[package]
+name = "erez-daemon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+erez-core = { path = "../erez-core" }
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[features]
+default = []
+live-audio = ["erez-core/audio-cpal"]
+vosk-stt = ["erez-core/vosk-stt"]
+live-vosk = ["live-audio", "vosk-stt"]
+
+[dev-dependencies]
+tempfile.workspace = true
+tower.workspace = true

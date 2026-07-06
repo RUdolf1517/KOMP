@@ -1,0 +1,20 @@
+id = "system_restart"
+name = "KOMP restart scenario"
+enabled = true
+
+[[scenarios]]
+id = "restart_komp"
+aliases = ["перезагрузка", "перезагрузись", "перезапусти комп", "рестарт комп", "restart", "restart komp"]
+priority = 60
+
+[[scenarios.steps]]
+id = "deactivate"
+action = { type = "play_sound", file = "sounds/system/shutdown.mp3" }
+
+[[scenarios.steps]]
+id = "request_restart"
+action = { type = "emit_event", event = "komp_restart_requested", payload = {} }
+
+[[scenarios.steps]]
+id = "activate"
+action = { type = "play_sound", file = "sounds/system/startup.mp3" }

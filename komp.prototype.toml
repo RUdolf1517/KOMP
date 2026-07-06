@@ -1,0 +1,37 @@
+wake_phrase = "комп"
+wake_phrases = ["комп", "компьютер"]
+wake_grammar = ["комп", "компьютер"]
+primary_language = "ru"
+english_fallback = true
+plugin_dirs = ["plugins.example"]
+
+[models]
+ru_vosk_path = "vendor/vosk/models/ru"
+en_vosk_path = "vendor/vosk/models/en"
+
+[lmstudio]
+enabled = false
+base_url = "http://localhost:1234/v1"
+model = "local-model"
+timeout_ms = 2500
+min_confidence = 0.55
+
+[whisper]
+enabled = false
+# cli_path = "vendor/whisper.cpp/build/bin/whisper-cli"
+# model_path = "vendor/whisper.cpp/models/ggml-base.bin"
+language = "ru"
+timeout_ms = 8000
+extra_args = ["-nt"]
+
+[audio]
+sample_rate_hz = 16000
+command_timeout_ms = 7000
+end_silence_ms = 900
+command_preroll_ms = 300
+
+[sounds]
+startup = "sounds/system/startup.mp3"
+shutdown = "sounds/system/shutdown.mp3"
+wake = "sounds/system/listening.mp3"
+listening = "sounds/system/listening.mp3"

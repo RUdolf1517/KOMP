@@ -1,0 +1,16 @@
+id = "system_hello"
+name = "System hello scenario"
+enabled = true
+
+[[scenarios]]
+id = "hello"
+aliases = ["привет", "комп привет", "здравствуй", "hello", "hi"]
+priority = 50
+
+[[scenarios.steps]]
+id = "say_hello"
+action = { type = "play_sound", file = "sounds/system/hello.mp3" }
+
+[[scenarios.steps]]
+id = "done"
+action = { type = "emit_event", event = "hello_done", payload = {} }

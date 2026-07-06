@@ -1,0 +1,25 @@
+id = "browser_quieter"
+name = "Browser quieter scenario"
+enabled = true
+
+[[scenarios]]
+id = "browser_quieter"
+aliases = ["включи браузер громкость ниже", "open browser lower volume"]
+priority = 20
+
+[[scenarios.steps]]
+id = "ack"
+action = { type = "play_sound", file = "sounds/system/listening.mp3" }
+on_error = "open_browser"
+
+[[scenarios.steps]]
+id = "open_browser"
+action = { type = "open_app", app = "Google Chrome" }
+
+[[scenarios.steps]]
+id = "lower_volume"
+action = { type = "set_volume", delta = -15 }
+
+[[scenarios.steps]]
+id = "done"
+action = { type = "emit_event", event = "browser_quieter_done", payload = {} }

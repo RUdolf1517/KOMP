@@ -1,0 +1,35 @@
+name: Linux
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: ./scripts/install-linux-deps.sh
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Check Linux shell scripts
+        run: bash -n scripts/install-linux-deps.sh scripts/setup-vosk-linux.sh scripts/run-prototype-linux.sh scripts/run-daemon-live-linux.sh scripts/verify-linux.sh
+
+      - name: Test workspace
+        run: cargo test
+
+      - name: Install native Vosk
+        run: ./scripts/setup-vosk-linux.sh
+
+      - name: Build live daemon
+        run: cargo build -p erez-daemon --features live-vosk
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/vendor/vosk/lib

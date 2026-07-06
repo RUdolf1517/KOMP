@@ -1,0 +1,239 @@
+# KOMP Backend
+
+Rust backend skeleton for an offline RU/EN voice assistant with wake phrase `комп`, local plugin commands, scenarios, MP3 responses, and optional LM Studio fallback.
+
+## What Works In This V1
+
+- Rust workspace with `erez-core`, `erez-daemon`, and `erez-cli`.
+- Config defaults for wake phrase `комп`, RU primary language, EN fallback, model paths, and LM Studio.
+- Wake phrase text detection with Vosk-compatible grammar variants.
+- Plugin manifests in TOML with aliases, regex slots, and action types.
+- Scenario manifests in TOML with ordered steps, conditions, `ask` replies, and branching.
+- Multiple wake phrases through `wake_phrases`, while legacy `wake_grammar` still works.
+- MP3/WAV/OGG sound playback actions via `play_sound` / `say_sound`.
+- LM Studio fallback client using `POST /v1/chat/completions`.
+- CPAL microphone capture behind the `audio-cpal` feature.
+- Vosk STT adapter behind the `vosk-stt` feature.
+- WAV loading helpers for fixture/manual tests.
+- Local daemon API:
+  - `GET /health`
+  - `GET /events` SSE
+  - `GET /events/ws` WebSocket
+  - `POST /commands/reload`
+  - `POST /listen/once`
+  - `POST /listen/live` when built with `--features live-vosk`
+  - `POST /listen/start` to start the always-on wake loop when built with `--features live-vosk`
+  - `POST /listen/stop` to stop the always-on wake loop
+  - `POST /config`
+  - `GET /models`
+
+Models are configured as local paths and are not bundled into this repository.
+
+## Try It
+
+One-command macOS prototype:
+
+```bash
+./scripts/run-prototype-macos.sh
+```
+
+It downloads native Vosk, downloads small RU/EN models, writes `komp.prototype.toml`, builds the daemon with `live-vosk`, starts the always-on wake loop, and prints logs in the terminal. Say `комп`, then speak a command; the recognized text and resolved intent will appear in the logs.
+
+Windows prototype:
+
+```powershell
+.\scripts\run-prototype-windows.ps1
+```
+
+Ubuntu/Debian prototype:
+
+```bash
+./scripts/install-linux-deps.sh
+./scripts/run-prototype-linux.sh
+```
+
+To verify Ubuntu/Debian build support without starting the microphone loop:
+
+```bash
+./scripts/verify-linux.sh
+```
+
+The same scripts are intended for regular Ubuntu and Debian desktop installs; CI runs the Linux build path on `ubuntu-latest`.
+
+For Linux `set_volume` uses `wpctl` when available and falls back to `pactl`; install `wireplumber` or `pulseaudio-utils` if volume scenarios need it. Linux `hotkey` uses `xdotool`, which is usually X11-only and only needed for hotkey scenarios.
+
+Manual commands:
+
+```bash
+cargo run -p erez-cli -- init-config komp.toml
+cargo run -p erez-cli -- wake-test "комп, открой браузер"
+cargo run -p erez-cli -- plugins-validate plugins.example
+cargo run -p erez-cli -- scenarios-validate plugins.example
+cargo run -p erez-cli -- scenario-run browser_quieter --plugins plugins.example --dry-run
+cargo run -p erez-cli -- sound-test sounds/system/listening.mp3 --dry-run
+cargo run -p erez-cli -- resolve "открой браузер" --plugins plugins.example --no-lmstudio
+cargo run -p erez-cli -- wav-info ./command.wav
+cargo run -p erez-cli -- whisper-wav ./command.wav --config komp.prototype.toml
+cargo run -p erez-daemon
+```
+
+The daemon loads `komp.toml` from the current directory, then falls back to `erez.toml`; `KOMP_CONFIG` overrides both. `EREZ_CONFIG` still works for compatibility.
+
+## Whisper Command STT
+
+Vosk remains the wake recognizer and the fallback command recognizer. To try `whisper.cpp` for commands after wake, install/build `whisper-cli`, download a multilingual ggml model, then enable:
+
+```toml
+[whisper]
+enabled = true
+cli_path = "vendor/whisper.cpp/build/bin/whisper-cli"
+model_path = "vendor/whisper.cpp/models/ggml-base.bin"
+language = "ru"
+timeout_ms = 8000
+extra_args = ["-nt"]
+```
+
+If `whisper.cpp` is disabled, missing, times out, or returns an empty transcript, KOMP falls back to Vosk automatically.
+
+If the first syllable or word is clipped after wake, increase command pre-roll:
+
+```toml
+[audio]
+command_preroll_ms = 300
+```
+
+## Sounds
+
+Put MP3/WAV/OGG files into `sounds/` and reference them from config or scenarios.
+
+Global assistant sounds are configured in `komp.toml`:
+
+```toml
+[sounds]
+startup = "sounds/system/startup.mp3"
+shutdown = "sounds/system/shutdown.mp3"
+wake = "sounds/system/listening.mp3"
+listening = "sounds/system/listening.mp3"
+```
+
+`startup` plays when KOMP starts, `shutdown` plays when KOMP stops, `wake` plays immediately after the wake phrase is detected, and `listening` plays right before command capture starts.
+
+Then:
+
+```bash
+curl http://127.0.0.1:3737/health
+curl -X POST http://127.0.0.1:3737/listen/once \
+  -H 'content-type: application/json' \
+  -d '{"transcript":"найди погоду в москве"}'
+```
+
+Dialog scenarios can be tested through `replies`:
+
+```bash
+curl -X POST http://127.0.0.1:3737/listen/once \
+  -H 'content-type: application/json' \
+  -d '{"transcript":"открой браузер какой","replies":["chrome"]}'
+```
+
+## Scenarios
+
+Scenarios can live in their own folders under a plugin directory. KOMP loads TOML manifests recursively, so this works:
+
+```text
+plugins.example/
+  scenarios/
+    hello/
+      scenario.toml
+    restart/
+      scenario.toml
+```
+
+A scenario manifest looks like:
+
+```toml
+[[scenarios]]
+id = "browser_quieter"
+aliases = ["включи браузер громкость ниже", "open browser lower volume"]
+priority = 20
+
+[[scenarios.steps]]
+id = "ack"
+action = { type = "play_sound", file = "sounds/system/listening.mp3" }
+on_error = "open_browser"
+
+[[scenarios.steps]]
+id = "open_browser"
+action = { type = "open_app", app = "Google Chrome" }
+
+[[scenarios.steps]]
+id = "lower_volume"
+action = { type = "set_volume", delta = -15 }
+```
+
+Branching can use `when`, `on_success`, and `on_error`. Dialog steps use `ask` or `wait_for_reply` with a `reply_slot`, then later steps can branch on that slot.
+
+Examples:
+
+```toml
+[[scenarios.steps]]
+id = "only_macos"
+when = { os = "macos" }
+action = { type = "open_app", app = "Safari" }
+
+[[scenarios.steps]]
+id = "chrome_reply"
+when = { slot = "browser", contains = "chrome" }
+action = { type = "open_app", app = "Google Chrome" }
+
+[[scenarios.steps]]
+id = "after_success"
+when = { previous_success = true }
+action = { type = "play_sound", file = "sounds/success.mp3" }
+```
+
+## Live Vosk Mode
+
+The one-command prototype above is preferred. For manual setup, configure `komp.toml` with local model directories:
+
+```toml
+[models]
+ru_vosk_path = "/absolute/path/to/vosk-model-small-ru"
+en_vosk_path = "/absolute/path/to/vosk-model-small-en-us"
+```
+
+Install native Vosk:
+
+```bash
+./scripts/setup-vosk-macos.sh
+# or
+./scripts/setup-vosk-linux.sh
+```
+
+Run the live daemon with autostart:
+
+```bash
+KOMP_CONFIG=komp.toml KOMP_AUTOSTART=1 ./scripts/run-daemon-live-macos.sh
+# or
+KOMP_CONFIG=komp.toml KOMP_AUTOSTART=1 ./scripts/run-daemon-live-linux.sh
+```
+
+Then trigger one microphone command window:
+
+```bash
+curl -X POST http://127.0.0.1:3737/listen/live
+```
+
+Or start the always-on wake loop:
+
+```bash
+curl -X POST http://127.0.0.1:3737/listen/start
+curl -X POST http://127.0.0.1:3737/listen/stop
+```
+
+Transcribe a WAV without the daemon:
+
+```bash
+cargo run -p erez-cli --features vosk-stt -- transcribe-wav ./command.wav --config komp.toml --language ru
+```
+
+On macOS the app needs microphone permission. On Windows and Linux, the default input device must be available to CPAL. On Ubuntu/Debian, install ALSA development headers before building live audio: `sudo apt install libasound2-dev pkg-config`.

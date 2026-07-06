@@ -1,0 +1,29 @@
+wake_phrase = "комп"
+wake_phrases = ["комп", "компьютер"]
+wake_grammar = ["комп", "компьютер"]
+primary_language = "ru"
+english_fallback = true
+plugin_dirs = ["plugins.example"]
+
+[models]
+ru_vosk_path = "/absolute/path/to/vosk-model-small-ru"
+en_vosk_path = "/absolute/path/to/vosk-model-small-en-us"
+
+[lmstudio]
+enabled = true
+base_url = "http://localhost:1234/v1"
+model = "local-model"
+timeout_ms = 2500
+min_confidence = 0.55
+
+[audio]
+sample_rate_hz = 16000
+command_timeout_ms = 5000
+end_silence_ms = 700
+command_preroll_ms = 300
+
+[sounds]
+startup = "sounds/system/startup.mp3"
+shutdown = "sounds/system/shutdown.mp3"
+wake = "sounds/system/listening.mp3"
+listening = "sounds/system/listening.mp3"

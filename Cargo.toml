@@ -1,0 +1,37 @@
+[workspace]
+members = [
+    "crates/erez-core",
+    "crates/erez-daemon",
+    "crates/erez-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Erez contributors"]
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+axum = { version = "0.7", features = ["ws"] }
+clap = { version = "4.5", features = ["derive"] }
+cpal = "0.15"
+futures-util = "0.3"
+hound = "3.5"
+regex = "1.10"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rodio = "0.20"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.10"
+thiserror = "1.0"
+tokio = { version = "1.39", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+toml = "0.8"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.10", features = ["v4", "serde"] }
+vosk = "0.3.1"
