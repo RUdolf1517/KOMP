@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/ensure-rust.sh"
 export LD_LIBRARY_PATH="$ROOT_DIR/vendor/vosk/lib:${LD_LIBRARY_PATH:-}"
 export LIBRARY_PATH="$ROOT_DIR/vendor/vosk/lib:${LIBRARY_PATH:-}"
 export RUSTFLAGS="-L native=$ROOT_DIR/vendor/vosk/lib ${RUSTFLAGS:-}"

@@ -62,6 +62,8 @@ need_cmd curl
 need_cmd unzip
 need_cmd xdg-open
 
+source "$ROOT_DIR/scripts/ensure-rust.sh"
+
 if [[ ! -f "$VENDOR_DIR/lib/libvosk.so" ]]; then
   "$ROOT_DIR/scripts/setup-vosk-linux.sh"
 else

@@ -26,10 +26,11 @@ need_cmd curl
 need_cmd unzip
 need_cmd xdg-open
 need_cmd pkg-config
+source "$ROOT_DIR/scripts/ensure-rust.sh"
 
 cd "$ROOT_DIR"
 
-bash -n scripts/install-linux-deps.sh scripts/setup-vosk-linux.sh scripts/run-prototype-linux.sh scripts/run-daemon-live-linux.sh scripts/verify-linux.sh
+bash -n scripts/ensure-rust.sh scripts/install-linux-deps.sh scripts/setup-vosk-linux.sh scripts/run-prototype-linux.sh scripts/run-daemon-live-linux.sh scripts/verify-linux.sh
 cargo fmt --check
 cargo test
 

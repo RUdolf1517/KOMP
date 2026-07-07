@@ -21,7 +21,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Check Linux shell scripts
-        run: bash -n scripts/install-linux-deps.sh scripts/setup-vosk-linux.sh scripts/run-prototype-linux.sh scripts/run-daemon-live-linux.sh scripts/verify-linux.sh
+        run: bash -n scripts/ensure-rust.sh scripts/install-linux-deps.sh scripts/setup-vosk-linux.sh scripts/run-prototype-linux.sh scripts/run-daemon-live-linux.sh scripts/verify-linux.sh
 
       - name: Test workspace
         run: cargo test
