@@ -33,3 +33,5 @@ jobs:
         run: cargo build -p erez-daemon --features live-vosk
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/vendor/vosk/lib
+          LIBRARY_PATH: ${{ github.workspace }}/vendor/vosk/lib
+          RUSTFLAGS: -L native=${{ github.workspace }}/vendor/vosk/lib

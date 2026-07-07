@@ -14,7 +14,7 @@ need_cmd() {
         echo "On Ubuntu/Debian: sudo apt install curl unzip xdg-utils" >&2
         ;;
       pkg-config)
-        echo "On Ubuntu/Debian: sudo apt install pkg-config libasound2-dev" >&2
+        echo "On Ubuntu/Debian: run ./scripts/install-linux-deps.sh" >&2
         ;;
     esac
     exit 1
@@ -38,6 +38,8 @@ if [[ ! -f "$ROOT_DIR/vendor/vosk/lib/libvosk.so" ]]; then
 fi
 
 export LD_LIBRARY_PATH="$ROOT_DIR/vendor/vosk/lib:${LD_LIBRARY_PATH:-}"
+export LIBRARY_PATH="$ROOT_DIR/vendor/vosk/lib:${LIBRARY_PATH:-}"
+export RUSTFLAGS="-L native=$ROOT_DIR/vendor/vosk/lib ${RUSTFLAGS:-}"
 cargo build -p erez-daemon --features live-vosk
 
 echo "Ubuntu/Debian verification passed."

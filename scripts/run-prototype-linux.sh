@@ -112,6 +112,8 @@ listening = "sounds/system/listening.mp3"
 EOF
 
 export LD_LIBRARY_PATH="$VENDOR_DIR/lib:${LD_LIBRARY_PATH:-}"
+export LIBRARY_PATH="$VENDOR_DIR/lib:${LIBRARY_PATH:-}"
+export RUSTFLAGS="-L native=$VENDOR_DIR/lib ${RUSTFLAGS:-}"
 export KOMP_CONFIG="$CONFIG_PATH"
 export EREZ_CONFIG="$CONFIG_PATH"
 export KOMP_AUTOSTART=1
