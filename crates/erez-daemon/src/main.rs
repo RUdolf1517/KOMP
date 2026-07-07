@@ -18,13 +18,14 @@ use erez_core::{plugins::Scenario, Action, PluginManifest};
 use futures_util::{SinkExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::process::Command;
 use std::{
     collections::{HashMap, HashSet},
     convert::Infallible,
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
@@ -2204,7 +2205,7 @@ fn sanitize_sound_file_name(file_name: &str) -> String {
 }
 
 fn scan_installed_apps() -> Vec<AppInfo> {
-    let mut apps = Vec::new();
+    let mut apps: Vec<AppInfo> = Vec::new();
     #[cfg(target_os = "macos")]
     {
         scan_macos_apps(Path::new("/Applications"), &mut apps);

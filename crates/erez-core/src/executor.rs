@@ -1,6 +1,8 @@
 use crate::plugins::Action;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs::File, io::BufReader, path::Path, process::Command};
+#[cfg(target_os = "macos")]
+use std::path::Path;
+use std::{collections::HashMap, fs::File, io::BufReader, process::Command};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -349,6 +351,7 @@ exec xdg-open "$app"
     }
 }
 
+#[cfg(target_os = "macos")]
 fn looks_like_app_path(app: &str) -> bool {
     let trimmed = app.trim();
     Path::new(trimmed).is_absolute()
