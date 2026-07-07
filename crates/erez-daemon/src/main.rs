@@ -12,7 +12,7 @@ use base64::{engine::general_purpose, Engine as _};
 use erez_core::{
     apply_slots_to_action, ActionExecutor, AssistantEvent, DefaultIntentResolver, ErezConfig,
     EventKind, IntentRequest, IntentResolver, IntentResult, LmStudioConfig, NoopReplyProvider,
-    PluginRegistry, ScenarioRunner, StaticReplyProvider,
+    PluginRegistry, ResolvedAction, ScenarioRunner, StaticReplyProvider,
 };
 use erez_core::{plugins::Scenario, Action, PluginManifest};
 use futures_util::{SinkExt, Stream, StreamExt};
@@ -58,6 +58,16 @@ const SYSTEM_SOUND_SLOTS: [&str; 14] = [
 const AUDIO_PLAYBACK_SETTLE_GUARD_MS: u64 = 700;
 const SCENARIO_AUDIO_GUARD_MS: u64 = 8_000;
 const DEFAULT_USER_PLUGIN_ROOT: &str = "plugins.user";
+const BATTERY_STATUS_ALIASES: [&str; 8] = [
+    "сколько зарядки",
+    "сколько заряда",
+    "заряд батареи",
+    "статус батареи",
+    "сколько процентов батарея",
+    "сколько процентов заряд",
+    "проверить заряд",
+    "battery status",
+];
 
 #[derive(Clone)]
 struct AppState {
@@ -1530,6 +1540,10 @@ async fn process_transcript_with_replies(
     );
 
     let config = state.config.read().await.clone();
+    if let Some(result) = resolve_system_intent(&transcript) {
+        return process_intent_result(&state, Ok(result), replies).await;
+    }
+
     let registry = state.registry.read().await.clone();
     let resolver = DefaultIntentResolver::new(registry, config.lmstudio);
     let result = resolver
@@ -1540,6 +1554,33 @@ async fn process_transcript_with_replies(
         .await;
 
     process_intent_result(&state, result, replies).await
+}
+
+fn resolve_system_intent(transcript: &str) -> Option<IntentResult> {
+    let best_score = BATTERY_STATUS_ALIASES
+        .iter()
+        .filter_map(|alias| erez_core::normalize::fuzzy_phrase_score(transcript, alias))
+        .fold(0.0_f32, f32::max);
+    if best_score < 0.78 {
+        return None;
+    }
+
+    Some(IntentResult {
+        utterance: transcript.to_string(),
+        resolved: Some(ResolvedAction {
+            source: "system".into(),
+            plugin_id: Some("komp_system".into()),
+            command_id: Some("battery_status".into()),
+            action: Action::EmitEvent {
+                event: "battery_status_requested".into(),
+                payload: json!({ "source": "system_intent" }),
+            },
+            confidence: best_score,
+            slots: HashMap::new(),
+            speak: None,
+        }),
+        fallback_error: None,
+    })
 }
 
 async fn process_intent_result(
@@ -1624,6 +1665,17 @@ async fn process_intent_result(
                             );
                         }
                     }
+                } else if is_system_battery_status_intent(resolved) {
+                    emit(
+                        &state,
+                        EventKind::ActionExecuted,
+                        "system battery status requested",
+                        json!({
+                            "executed": true,
+                            "message": "system battery status requested"
+                        }),
+                    );
+                    announce_battery_status(state);
                 } else {
                     let action = apply_slots_to_action(&resolved.action, &resolved.slots);
                     if matches!(action, Action::PlaySound { .. } | Action::SaySound { .. }) {
@@ -1684,6 +1736,10 @@ async fn process_intent_result(
             )
         }
     }
+}
+
+fn is_system_battery_status_intent(resolved: &ResolvedAction) -> bool {
+    resolved.source == "system" && resolved.command_id.as_deref() == Some("battery_status")
 }
 
 async fn handle_system_scenario_effects(state: &AppState, scenario_id: &str) {
@@ -2649,6 +2705,16 @@ action = { type = "emit_event", event = "safari", payload = {} }
         assert!(windows_battery_status_power_connected("6"));
         assert!(!windows_battery_status_power_connected("4"));
         assert!(!windows_battery_status_power_connected("5"));
+    }
+
+    #[test]
+    fn system_intent_resolves_battery_status_without_plugin_scenario() {
+        let result = resolve_system_intent("сколько зарядки").unwrap();
+        let resolved = result.resolved.unwrap();
+        assert_eq!(resolved.source, "system");
+        assert_eq!(resolved.command_id.as_deref(), Some("battery_status"));
+        assert_eq!(resolved.confidence, 1.0);
+        assert!(matches!(resolved.action, Action::EmitEvent { .. }));
     }
 
     #[tokio::test]

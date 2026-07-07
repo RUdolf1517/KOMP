@@ -368,8 +368,7 @@ function renderStep(step, index, readonly) {
 }
 
 function actionFields(a, ro) {
-  const appOptions = ["", ...state.apps.map(app => app.name)];
-  if (a.type === "open_app") return [field("Выбрать приложение", select(appOptions, a.app || "", v => a.app = v, ro)), field("Или написать вручную", input(a.app || "", v => a.app = v, ro, "text", "Discord"))];
+  if (a.type === "open_app") return openAppFields(a, ro);
   if (a.type === "set_volume") return [field("Поставить уровень 0-100", input(a.level ?? "", v => a.level = v === "" ? undefined : Number(v), ro, "number")), field("Изменить на", input(a.delta ?? "", v => a.delta = v === "" ? undefined : Number(v), ro, "number", "-15"))];
   if (a.type === "play_sound" || a.type === "say_sound") return [soundField("Файл", a, "file", ro)];
   if (a.type === "ask") return [soundField("Звук вопроса", a, "sound", ro), field("Куда сохранить ответ", input(a.reply_slot || "", v => a.reply_slot = v, ro, "text", "browser"))];
@@ -380,6 +379,15 @@ function actionFields(a, ro) {
   if (a.type === "http_request") return [field("Method", input(a.method || "GET", v => a.method = v, ro)), field("URL", input(a.url || "", v => a.url = v, ro))];
   if (a.type === "shell") return [field("Command", input(a.command || "", v => a.command = v, ro)), field("Enabled", select(["false","true"], String(!!a.enabled), v => a.enabled = v === "true", ro))];
   return [];
+}
+
+function openAppFields(a, ro) {
+  const appOptions = ["", ...state.apps.map(app => app.path || app.name)];
+  const appLabels = Object.fromEntries(state.apps.map(app => [app.path || app.name, app.path ? `${app.name} · ${compactSoundPath(app.path)}` : app.name]));
+  return [
+    field("Выбрать установленное приложение", select(appOptions, a.app || "", v => a.app = v, ro, false, appLabels)),
+    field("Путь или имя вручную", input(a.app || "", v => a.app = v, ro, "text", "/Applications/Discord.app"))
+  ];
 }
 
 function panel(title, children) { return el("section", { class: "panel" }, [el("h2", {}, [title]), ...children]); }

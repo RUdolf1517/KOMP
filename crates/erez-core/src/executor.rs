@@ -1,6 +1,6 @@
 use crate::plugins::Action;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs::File, io::BufReader, process::Command};
+use std::{collections::HashMap, fs::File, io::BufReader, path::Path, process::Command};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -309,7 +309,11 @@ fn platform_open_app(app: &str) -> Result<Command, ActionError> {
     #[cfg(target_os = "macos")]
     {
         let mut command = Command::new("open");
-        command.arg("-a").arg(app);
+        if looks_like_app_path(app) {
+            command.arg(app);
+        } else {
+            command.arg("-a").arg(app);
+        }
         Ok(command)
     }
     #[cfg(target_os = "windows")]
@@ -343,6 +347,14 @@ exec xdg-open "$app"
             .arg(app);
         Ok(command)
     }
+}
+
+fn looks_like_app_path(app: &str) -> bool {
+    let trimmed = app.trim();
+    Path::new(trimmed).is_absolute()
+        || trimmed.contains(std::path::MAIN_SEPARATOR)
+        || trimmed.ends_with(".app")
+        || trimmed.ends_with(".exe")
 }
 
 fn platform_open_url(url: &str) -> Result<Command, ActionError> {
