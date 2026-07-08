@@ -139,12 +139,22 @@ extra_args = ["-nt"]
 
 If `whisper.cpp` is disabled, missing, times out, or returns an empty transcript, KOMP falls back to Vosk automatically.
 
+To check brand/app names and measure latency on a recorded command:
+
+```bash
+cargo run -p erez-cli -- whisper-wav ./command.wav --config komp.prototype.toml
+```
+
+The JSON output includes `transcript.text` and `latency_ms`. In live mode, successful command recognition logs also include `stt_latency_ms`.
+
 If the first syllable or word is clipped after wake, increase command pre-roll:
 
 ```toml
 [audio]
 command_preroll_ms = 300
 ```
+
+Wake/listening sounds are played asynchronously, so KOMP starts recording the command immediately after wake detection instead of waiting for the mp3 to finish. Use short, quiet wake sounds or headphones if the microphone picks up the assistant sound.
 
 ## Sounds
 

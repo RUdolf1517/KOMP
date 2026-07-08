@@ -1344,20 +1344,11 @@ fn run_live_listener(
             "wake phrase detected",
             json!({ "text": wake_text }),
         ));
-        play_wake_feedback_sounds(
+        play_wake_feedback_sounds_async(
             config.sounds.wake.as_deref(),
             config.sounds.listening.as_deref(),
-            audio_playback_until_ms.as_ref(),
+            audio_playback_until_ms.clone(),
         );
-        if let Err(err) = drain_audio_playback(&mut source, audio_playback_until_ms.as_ref(), &stop)
-        {
-            let _ = events.send(AssistantEvent::new(
-                EventKind::Error,
-                "audio playback drain failed",
-                json!({ "error": err.to_string() }),
-            ));
-            continue;
-        }
 
         let audio =
             match collect_command_audio(&mut source, vad.clone(), config.audio.sample_rate_hz) {
@@ -1372,12 +1363,15 @@ fn run_live_listener(
                 }
             };
 
+        let stt_started_at = std::time::Instant::now();
         match transcribe_command_preferred(&mut recognizer, &audio, &config) {
             Ok(transcript) if !transcript.text.trim().is_empty() => {
+                let stt_latency_ms = stt_started_at.elapsed().as_millis() as u64;
                 info!(
                     text = %transcript.text,
                     language = ?transcript.language,
                     confidence = transcript.confidence,
+                    stt_latency_ms,
                     "speech recognized after wake"
                 );
                 let _ = transcripts.blocking_send(transcript.text);
@@ -1406,31 +1400,36 @@ fn run_live_listener(
     ));
 }
 
-#[cfg(all(feature = "live-audio", feature = "vosk-stt"))]
-fn drain_audio_playback(
-    source: &mut impl erez_core::audio::AudioSource,
-    audio_playback_until_ms: &AtomicU64,
-    stop: &AtomicBool,
-) -> Result<(), erez_core::audio::AudioError> {
-    while !stop.load(Ordering::SeqCst) && is_audio_playback_active(audio_playback_until_ms) {
-        let _ = source.next_frame()?;
-    }
-    Ok(())
-}
-
 #[allow(dead_code)]
-fn play_wake_feedback_sounds(wake: Option<&str>, listening: Option<&str>, guard: &AtomicU64) {
-    let wake = non_empty_sound(wake);
-    let listening = non_empty_sound(listening);
+fn play_wake_feedback_sounds_async(
+    wake: Option<&str>,
+    listening: Option<&str>,
+    audio_playback_until_ms: Arc<AtomicU64>,
+) {
+    let wake = non_empty_sound(wake).map(str::to_string);
+    let listening = non_empty_sound(listening).map(str::to_string);
+    if wake.is_none() && listening.is_none() {
+        return;
+    };
 
-    if let Some(wake) = wake {
-        play_configured_sound_blocking("wake", Some(wake), Some(guard));
-    }
-    if let Some(listening) = listening {
-        if wake != Some(listening) {
-            play_configured_sound_blocking("listening", Some(listening), Some(guard));
+    mark_audio_playback(
+        Some(audio_playback_until_ms.as_ref()),
+        AUDIO_PLAYBACK_INITIAL_GUARD_MS,
+    );
+    std::thread::spawn(move || {
+        if let Some(wake) = wake.as_deref() {
+            play_configured_sound_blocking("wake", Some(wake), None);
         }
-    }
+        if let Some(listening) = listening {
+            if wake.as_deref() != Some(listening.as_str()) {
+                play_configured_sound_blocking("listening", Some(&listening), None);
+            }
+        }
+        mark_audio_playback(
+            Some(audio_playback_until_ms.as_ref()),
+            AUDIO_PLAYBACK_SETTLE_GUARD_MS,
+        );
+    });
 }
 
 #[allow(dead_code)]

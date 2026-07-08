@@ -6,7 +6,7 @@ use erez_core::{
     ActionExecutor, DefaultIntentResolver, ErezConfig, IntentRequest, IntentResolver, Language,
     PluginRegistry,
 };
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, time::Instant};
 
 #[derive(Debug, Parser)]
 #[command(name = "komp")]
@@ -287,8 +287,16 @@ async fn whisper_wav(
         .with_context(|| format!("failed to read {}", path.display()))?;
     let mut recognizer =
         WhisperCppRecognizer::from_config(&config)?.context("whisper.cpp is not configured")?;
+    let started_at = Instant::now();
     let transcript = recognizer.transcribe(&frame.samples_i16, language.into())?;
-    println!("{}", serde_json::to_string_pretty(&transcript)?);
+    let latency_ms = started_at.elapsed().as_millis() as u64;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "transcript": transcript,
+            "latency_ms": latency_ms
+        }))?
+    );
     Ok(())
 }
 
