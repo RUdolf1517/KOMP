@@ -311,7 +311,8 @@ fn platform_open_app(app: &str) -> Result<Command, ActionError> {
     #[cfg(target_os = "macos")]
     {
         let mut command = Command::new("open");
-        if looks_like_app_path(app) {
+        let app = normalize_macos_app_path(app);
+        if looks_like_app_path(&app) {
             command.arg(app);
         } else {
             command.arg("-a").arg(app);
@@ -358,6 +359,15 @@ fn looks_like_app_path(app: &str) -> bool {
         || trimmed.contains(std::path::MAIN_SEPARATOR)
         || trimmed.ends_with(".app")
         || trimmed.ends_with(".exe")
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_macos_app_path(app: &str) -> String {
+    let trimmed = app.trim();
+    trimmed
+        .strip_prefix("/Application/")
+        .map(|rest| format!("/Applications/{rest}"))
+        .unwrap_or_else(|| trimmed.to_string())
 }
 
 fn platform_open_url(url: &str) -> Result<Command, ActionError> {
@@ -623,6 +633,15 @@ mod tests {
             Action::Url {
                 url: "https://www.google.com/search?q=%D1%87%D1%82%D0%BE+%D0%BD%D0%B8%D0%B1%D1%83%D0%B4%D1%8C".into()
             }
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_app_path_accepts_common_singular_applications_typo() {
+        assert_eq!(
+            normalize_macos_app_path("/Application/Discord.app"),
+            "/Applications/Discord.app"
         );
     }
 
