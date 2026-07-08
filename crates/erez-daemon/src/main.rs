@@ -1347,7 +1347,6 @@ fn run_live_listener(
         play_wake_feedback_sounds_async(
             config.sounds.wake.as_deref(),
             config.sounds.listening.as_deref(),
-            audio_playback_until_ms.clone(),
         );
 
         let audio =
@@ -1362,6 +1361,14 @@ fn run_live_listener(
                     continue;
                 }
             };
+
+        let command_audio_ms =
+            audio.len() as u64 * 1_000 / u64::from(config.audio.sample_rate_hz.max(1));
+        info!(
+            samples = audio.len(),
+            duration_ms = command_audio_ms,
+            "command audio captured after wake"
+        );
 
         let stt_started_at = std::time::Instant::now();
         match transcribe_command_preferred(&mut recognizer, &audio, &config) {
@@ -1401,21 +1408,13 @@ fn run_live_listener(
 }
 
 #[allow(dead_code)]
-fn play_wake_feedback_sounds_async(
-    wake: Option<&str>,
-    listening: Option<&str>,
-    audio_playback_until_ms: Arc<AtomicU64>,
-) {
+fn play_wake_feedback_sounds_async(wake: Option<&str>, listening: Option<&str>) {
     let wake = non_empty_sound(wake).map(str::to_string);
     let listening = non_empty_sound(listening).map(str::to_string);
     if wake.is_none() && listening.is_none() {
         return;
     };
 
-    mark_audio_playback(
-        Some(audio_playback_until_ms.as_ref()),
-        AUDIO_PLAYBACK_INITIAL_GUARD_MS,
-    );
     std::thread::spawn(move || {
         if let Some(wake) = wake.as_deref() {
             play_configured_sound_blocking("wake", Some(wake), None);
@@ -1425,10 +1424,6 @@ fn play_wake_feedback_sounds_async(
                 play_configured_sound_blocking("listening", Some(&listening), None);
             }
         }
-        mark_audio_playback(
-            Some(audio_playback_until_ms.as_ref()),
-            AUDIO_PLAYBACK_SETTLE_GUARD_MS,
-        );
     });
 }
 
