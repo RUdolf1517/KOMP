@@ -249,7 +249,7 @@ impl PluginRegistry {
                 if let Some(plugin_match) = match_scenario(manifest, scenario, &normalized)? {
                     let replace = best
                         .as_ref()
-                        .map(|current| plugin_match.confidence > current.confidence)
+                        .map(|current| should_replace_match(current, &plugin_match))
                         .unwrap_or(true);
                     if replace {
                         best = Some(plugin_match);
@@ -261,7 +261,7 @@ impl PluginRegistry {
                 if let Some(plugin_match) = match_command(manifest, command, &normalized)? {
                     let replace = best
                         .as_ref()
-                        .map(|current| plugin_match.confidence > current.confidence)
+                        .map(|current| should_replace_match(current, &plugin_match))
                         .unwrap_or(true);
                     if replace {
                         best = Some(plugin_match);
@@ -272,6 +272,16 @@ impl PluginRegistry {
 
         Ok(best)
     }
+}
+
+fn should_replace_match(current: &PluginMatch, next: &PluginMatch) -> bool {
+    if next.confidence > current.confidence {
+        return true;
+    }
+    let same_confidence = (next.confidence - current.confidence).abs() <= f32::EPSILON;
+    same_confidence
+        && next.plugin_id.starts_with("user_")
+        && !current.plugin_id.starts_with("user_")
 }
 
 fn load_manifests_recursive(
@@ -485,6 +495,47 @@ mod tests {
             .unwrap();
         assert_eq!(found.command_id, "browser_quieter");
         assert!(matches!(found.action, Action::Scenario { .. }));
+    }
+
+    #[test]
+    fn user_manifest_overrides_system_on_equal_confidence() {
+        let system = PluginManifest {
+            id: "system_minimize_window".into(),
+            name: "System minimize".into(),
+            enabled: true,
+            commands: vec![],
+            scenarios: vec![Scenario {
+                id: "minimize_active_window".into(),
+                aliases: vec!["сверни окно".into()],
+                patterns: vec![],
+                priority: 15,
+                sounds: ScenarioSounds::default(),
+                steps: vec![],
+            }],
+        };
+        let user = PluginManifest {
+            id: "user_minimize_active_window_copy".into(),
+            name: "User minimize".into(),
+            enabled: true,
+            commands: vec![],
+            scenarios: vec![Scenario {
+                id: "minimize_active_window_copy".into(),
+                aliases: vec!["сверни окно".into()],
+                patterns: vec![],
+                priority: 15,
+                sounds: ScenarioSounds {
+                    success: Some("ok.mp3".into()),
+                    ..ScenarioSounds::default()
+                },
+                steps: vec![],
+            }],
+        };
+        let found = PluginRegistry::from_manifests(vec![system, user])
+            .find_match("сверни окно")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.plugin_id, "user_minimize_active_window_copy");
+        assert_eq!(found.command_id, "minimize_active_window_copy");
     }
 
     #[test]

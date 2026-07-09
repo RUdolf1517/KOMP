@@ -180,8 +180,44 @@ impl ScenarioRunner {
             };
         }
 
+        let scenario_success = run
+            .steps
+            .iter()
+            .filter(|step| !step.skipped)
+            .all(|step| step.success);
+        self.execute_final_scenario_sound(scenario, scenario_success, &mut run);
+
         run.slots = context.slots;
         Ok(run)
+    }
+
+    fn execute_final_scenario_sound(
+        &self,
+        scenario: &Scenario,
+        scenario_success: bool,
+        run: &mut ScenarioRun,
+    ) {
+        let (id, sound) = if scenario_success {
+            ("scenario_success_sound", scenario.sounds.success.as_ref())
+        } else {
+            ("scenario_error_sound", scenario.sounds.error.as_ref())
+        };
+        let Some(sound) = sound else {
+            return;
+        };
+
+        let outcome = self.execute_or_dry_run(&Action::PlaySound {
+            file: sound.clone(),
+        });
+        let (success, message) = outcome
+            .map(|outcome| (outcome.executed, outcome.message))
+            .unwrap_or_else(|err| (false, err.to_string()));
+        run.steps.push(ScenarioStepResult {
+            id: id.into(),
+            skipped: false,
+            success,
+            message,
+        });
     }
 
     fn execute_step(
@@ -457,6 +493,21 @@ mod tests {
         assert_eq!(run.slots.get("browser").unwrap(), "chrome пожалуйста");
         assert!(!run.steps[1].skipped);
         assert!(run.steps[2].skipped);
+    }
+
+    #[test]
+    fn scenario_success_sound_runs_after_successful_steps() {
+        let mut manifest = registry().manifests().first().unwrap().clone();
+        manifest.scenarios[0].sounds.success = Some("sounds/system/success.mp3".into());
+        let registry = PluginRegistry::from_manifests(vec![manifest]);
+        let runner = ScenarioRunner::new(registry, ActionExecutor).dry_run(true);
+        let mut replies = StaticReplyProvider::new(vec!["chrome".into()]);
+        let run = runner
+            .run("demo", "branch", HashMap::new(), &mut replies)
+            .unwrap();
+        let final_step = run.steps.last().unwrap();
+        assert_eq!(final_step.id, "scenario_success_sound");
+        assert!(final_step.success);
     }
 
     #[test]

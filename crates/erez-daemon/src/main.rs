@@ -1994,6 +1994,11 @@ fn validate_scenario_document(
     if document.scenario.steps.is_empty() {
         errors.push("add at least one step".into());
     }
+    validate_sound_ref(document.scenario.sounds.wake.as_deref(), &mut errors);
+    validate_sound_ref(document.scenario.sounds.listening.as_deref(), &mut errors);
+    validate_sound_ref(document.scenario.sounds.success.as_deref(), &mut errors);
+    validate_sound_ref(document.scenario.sounds.error.as_deref(), &mut errors);
+    validate_sound_ref(document.scenario.sounds.timeout.as_deref(), &mut errors);
 
     let mut step_ids = HashSet::new();
     for step in &document.scenario.steps {
