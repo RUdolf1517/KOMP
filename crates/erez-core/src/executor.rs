@@ -315,7 +315,7 @@ fn platform_open_app(app: &str) -> Result<Command, ActionError> {
         if looks_like_app_path(&app) {
             command.arg(app);
         } else {
-            command.arg("-a").arg(app);
+            command.arg("-a").arg(normalize_macos_app_name(&app));
         }
         Ok(command)
     }
@@ -336,6 +336,15 @@ case "$app" in
   "Google Chrome"|"Chrome"|"google chrome") app="google-chrome" ;;
   "Chromium"|"chromium") app="chromium" ;;
   "Firefox"|"firefox") app="firefox" ;;
+esac
+case "$app" in
+  "Terminal"|"terminal"|"терминал")
+    for terminal in x-terminal-emulator gnome-terminal konsole xfce4-terminal mate-terminal alacritty kitty foot; do
+      if command -v "$terminal" >/dev/null 2>&1; then
+        exec "$terminal"
+      fi
+    done
+    ;;
 esac
 if command -v "$app" >/dev/null 2>&1; then
   exec "$app"
@@ -368,6 +377,15 @@ fn normalize_macos_app_path(app: &str) -> String {
         .strip_prefix("/Application/")
         .map(|rest| format!("/Applications/{rest}"))
         .unwrap_or_else(|| trimmed.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_macos_app_name(app: &str) -> String {
+    let trimmed = app.trim();
+    match trimmed.to_lowercase().as_str() {
+        "терминал" => "Terminal".to_string(),
+        _ => trimmed.to_string(),
+    }
 }
 
 fn platform_open_url(url: &str) -> Result<Command, ActionError> {

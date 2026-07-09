@@ -395,12 +395,30 @@ function actionFields(a, ro) {
 }
 
 function openAppFields(a, ro) {
-  const appOptions = ["", ...state.apps.map(app => app.path || app.name)];
-  const appLabels = Object.fromEntries(state.apps.map(app => [app.path || app.name, app.path ? `${app.name} · ${compactSoundPath(app.path)}` : app.name]));
+  const quickApps = [
+    { name: "Терминал", value: platformTerminalValue() },
+    { name: "Браузер по умолчанию", value: "browser" }
+  ];
+  const discovered = state.apps.map(app => ({ name: app.name, value: app.path || app.name, label: app.path ? `${app.name} · ${compactSoundPath(app.path)}` : app.name }));
+  const values = new Set(["", ...quickApps.map(app => app.value), ...discovered.map(app => app.value)]);
+  if (a.app && !values.has(a.app)) values.add(a.app);
+  const appOptions = [...values];
+  const appLabels = Object.fromEntries([
+    ...quickApps.map(app => [app.value, app.name]),
+    ...discovered.map(app => [app.value, app.label]),
+    ...(a.app && !quickApps.some(app => app.value === a.app) && !discovered.some(app => app.value === a.app) ? [[a.app, `Вручную · ${compactSoundPath(a.app)}`]] : [])
+  ]);
   return [
     field("Выбрать установленное приложение", select(appOptions, a.app || "", v => a.app = v, ro, false, appLabels)),
-    field("Путь или имя вручную", input(a.app || "", v => a.app = v, ro, "text", "/Applications/Discord.app"))
+    field("Путь или имя вручную", input(a.app || "", v => a.app = v, ro, "text", platformTerminalValue()))
   ];
+}
+
+function platformTerminalValue() {
+  const ua = navigator.userAgent.toLowerCase();
+  if (ua.includes("mac")) return "/System/Applications/Utilities/Terminal.app";
+  if (ua.includes("win")) return "Windows Terminal";
+  return "terminal";
 }
 
 function panel(title, children) { return el("section", { class: "panel" }, [el("h2", {}, [title]), ...children]); }

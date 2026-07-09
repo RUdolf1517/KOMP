@@ -2209,7 +2209,14 @@ fn scan_installed_apps() -> Vec<AppInfo> {
     let mut apps: Vec<AppInfo> = Vec::new();
     #[cfg(target_os = "macos")]
     {
-        scan_macos_apps(Path::new("/Applications"), &mut apps);
+        for dir in [
+            "/Applications",
+            "/Applications/Utilities",
+            "/System/Applications",
+            "/System/Applications/Utilities",
+        ] {
+            scan_macos_apps(Path::new(dir), &mut apps);
+        }
         if let Some(home) = std::env::var_os("HOME") {
             scan_macos_apps(&PathBuf::from(home).join("Applications"), &mut apps);
         }
@@ -2228,6 +2235,21 @@ fn scan_installed_apps() -> Vec<AppInfo> {
         .flatten()
         {
             scan_windows_shortcuts(&dir, &mut apps);
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        for dir in [
+            Some(PathBuf::from("/usr/share/applications")),
+            Some(PathBuf::from("/usr/local/share/applications")),
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|path| path.join(".local/share/applications")),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            scan_linux_desktop_apps(&dir, &mut apps);
         }
     }
     apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -2320,6 +2342,45 @@ fn scan_windows_shortcuts(dir: &Path, apps: &mut Vec<AppInfo>) {
                     source: "windows_start_menu".into(),
                 });
             }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn scan_linux_desktop_apps(dir: &Path, apps: &mut Vec<AppInfo>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("desktop") {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if content
+            .lines()
+            .any(|line| line.trim().eq_ignore_ascii_case("NoDisplay=true"))
+        {
+            continue;
+        }
+        let name = content
+            .lines()
+            .find_map(|line| line.strip_prefix("Name=").map(str::trim))
+            .unwrap_or_default()
+            .to_string();
+        let desktop_id = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if !name.is_empty() && !desktop_id.is_empty() {
+            apps.push(AppInfo {
+                name,
+                path: Some(desktop_id),
+                source: "linux_desktop_entry".into(),
+            });
         }
     }
 }
