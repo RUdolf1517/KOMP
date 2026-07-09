@@ -1,0 +1,36 @@
+id = "system_minimize_window"
+name = "System minimize active window"
+enabled = true
+commands = []
+
+[[scenarios]]
+id = "minimize_active_window"
+aliases = [
+  "сверни окно",
+  "сверни активное окно",
+  "убери окно",
+  "minimize window",
+  "minimize active window"
+]
+patterns = []
+priority = 15
+
+[[scenarios.steps]]
+id = "minimize_macos"
+when = { os = "macos" }
+action = { type = "hotkey", keys = ["cmd", "m"] }
+
+[[scenarios.steps]]
+id = "minimize_windows_menu"
+when = { os = "windows" }
+action = { type = "hotkey", keys = ["alt", "space"] }
+
+[[scenarios.steps]]
+id = "minimize_windows_select"
+when = { os = "windows" }
+action = { type = "hotkey", keys = ["n"] }
+
+[[scenarios.steps]]
+id = "minimize_linux"
+when = { os = "linux" }
+action = { type = "hotkey", keys = ["super", "h"] }

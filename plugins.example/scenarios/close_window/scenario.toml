@@ -1,0 +1,31 @@
+id = "system_close_window"
+name = "System close active window"
+enabled = true
+commands = []
+
+[[scenarios]]
+id = "close_active_window"
+aliases = [
+  "закрой окно",
+  "закрой активное окно",
+  "закрой текущее окно",
+  "close window",
+  "close active window"
+]
+patterns = []
+priority = 15
+
+[[scenarios.steps]]
+id = "close_macos"
+when = { os = "macos" }
+action = { type = "hotkey", keys = ["cmd", "w"] }
+
+[[scenarios.steps]]
+id = "close_windows"
+when = { os = "windows" }
+action = { type = "hotkey", keys = ["alt", "f4"] }
+
+[[scenarios.steps]]
+id = "close_linux"
+when = { os = "linux" }
+action = { type = "hotkey", keys = ["alt", "f4"] }

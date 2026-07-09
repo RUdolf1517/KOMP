@@ -40,7 +40,14 @@ use tracing::{error, info};
 
 const AUDIO_PLAYBACK_INITIAL_GUARD_MS: u64 = 3_000;
 const SYSTEM_SOUND_EXTENSIONS: [&str; 3] = ["mp3", "wav", "ogg"];
-const SYSTEM_SOUND_SLOTS: [&str; 14] = [
+const SYSTEM_SOUND_SLOTS: [&str; 21] = [
+    "startup",
+    "shutdown",
+    "wake",
+    "listening",
+    "success",
+    "error",
+    "timeout",
     "power_connected",
     "power_disconnected",
     "battery_0_10",
@@ -2431,6 +2438,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         let sounds = body["sounds"].as_array().unwrap();
+        assert!(sounds.iter().any(|sound| sound["slot"] == "startup"));
+        assert!(sounds.iter().any(|sound| sound["slot"] == "shutdown"));
+        assert!(sounds.iter().any(|sound| sound["slot"] == "wake"));
         let power_connected = sounds
             .iter()
             .find(|sound| sound["slot"] == "power_connected")

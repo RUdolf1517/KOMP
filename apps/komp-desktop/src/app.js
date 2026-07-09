@@ -14,6 +14,15 @@ const actionLabels = {
   shell: "Команда shell"
 };
 const quickStepTypes = ["open_app", "set_volume", "play_sound", "ask", "url"];
+const coreSystemSoundSlots = [
+  ["startup", "Запуск KOMP"],
+  ["shutdown", "Выход из KOMP"],
+  ["wake", "Отклик на wake-фразу"],
+  ["listening", "Готов слушать"],
+  ["success", "Успех"],
+  ["error", "Ошибка"],
+  ["timeout", "Таймаут"]
+];
 const batterySoundSlots = [
   ["battery_0_10", "Заряд 0-10%"],
   ["battery_10_20", "Заряд 10-20%"],
@@ -292,7 +301,11 @@ function renderSoundSettings() {
   root.replaceChildren(el("div", { class: "grid" }, [
     el("div", {}, [
       panel("Системная озвучка", [
-        help("Эти звуки не относятся к сценариям. KOMP проигрывает их сам, когда меняется питание ноутбука."),
+        help("Эти звуки не относятся к сценариям. KOMP проигрывает их сам при запуске, выходе, отклике и системных событиях."),
+        el("div", { class: "sound-grid two" }, coreSystemSoundSlots.map(([slot, label]) => systemSoundCard(label, slot)))
+      ]),
+      panel("Озвучка питания", [
+        help("Эти звуки проигрываются при подключении и отключении зарядки."),
         el("div", { class: "sound-grid two" }, powerSoundSlots.map(([slot, label]) => systemSoundCard(label, slot)))
       ]),
       panel("Озвучка уровня батареи", [
