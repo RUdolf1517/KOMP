@@ -49,6 +49,8 @@ One-command macOS prototype:
 
 It downloads native Vosk, downloads small RU/EN models, writes `komp.prototype.toml`, builds the daemon with `live-vosk`, starts the always-on wake loop, and prints logs in the terminal. Say `комп`, then speak a command; the recognized text and resolved intent will appear in the logs.
 
+Prototype launch scripts check `origin/<current-branch>` before starting. If the local checkout is behind and tracked files are clean, KOMP fast-forwards itself with `git pull --ff-only`; user files such as `plugins.user`, local models, and untracked sounds are left alone. If tracked files have local edits, auto-update is skipped. Set `KOMP_NO_AUTO_UPDATE=1` to disable this check.
+
 Windows prototype:
 
 ```powershell
@@ -302,6 +304,8 @@ Or start the always-on wake loop:
 curl -X POST http://127.0.0.1:3737/listen/start
 curl -X POST http://127.0.0.1:3737/listen/stop
 ```
+
+While a command or scenario is running, say `комп стоп` after the wake phrase to request cancellation. KOMP rejects new normal commands while busy, but accepts the stop command and cancels remaining scenario steps.
 
 Transcribe a WAV without the daemon:
 

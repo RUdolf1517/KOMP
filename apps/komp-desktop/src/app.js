@@ -504,7 +504,7 @@ function ensureConfig() {
     models: { ru_vosk_path: null, en_vosk_path: null },
     lmstudio: {},
     whisper: { enabled: false, cli_path: null, model_path: null, language: "ru", timeout_ms: 8000, extra_args: ["-nt"] },
-    audio: { sample_rate_hz: 16000, command_timeout_ms: 5000, end_silence_ms: 700, command_preroll_ms: 300 },
+    audio: { sample_rate_hz: 16000, command_timeout_ms: 10000, end_silence_ms: 1200, command_preroll_ms: 300 },
     sounds: {},
     plugin_dirs: ["plugins.example"]
   };

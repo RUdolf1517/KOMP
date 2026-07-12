@@ -76,6 +76,16 @@ const BATTERY_STATUS_ALIASES: [&str; 8] = [
     "проверить заряд",
     "battery status",
 ];
+const STOP_COMMAND_ALIASES: [&str; 8] = [
+    "стоп",
+    "комп стоп",
+    "остановись",
+    "отмена",
+    "отмени",
+    "прекрати",
+    "stop",
+    "cancel",
+];
 
 #[derive(Clone)]
 struct AppState {
@@ -85,6 +95,8 @@ struct AppState {
     executor: ActionExecutor,
     listener: Arc<RwLock<Option<LiveListenerControl>>>,
     audio_playback_until_ms: Arc<AtomicU64>,
+    cancel_generation: Arc<AtomicU64>,
+    active_command: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -182,6 +194,8 @@ async fn main() -> anyhow::Result<()> {
         executor: ActionExecutor,
         listener: Arc::new(RwLock::new(None)),
         audio_playback_until_ms: Arc::new(AtomicU64::new(0)),
+        cancel_generation: Arc::new(AtomicU64::new(0)),
+        active_command: Arc::new(AtomicBool::new(false)),
     };
 
     emit(
@@ -875,12 +889,26 @@ async fn start_live_listener_inner(state: AppState) -> Result<bool, AssistantEve
     }
 
     let processor_state = state.clone();
-    let runtime = tokio::runtime::Handle::current();
     if let Err(err) = std::thread::Builder::new()
         .name("erez-transcript-processor".into())
         .spawn(move || {
             while let Some(transcript) = transcripts_rx.blocking_recv() {
-                let _ = runtime.block_on(process_transcript(processor_state.clone(), transcript));
+                let state = processor_state.clone();
+                let _ = std::thread::Builder::new()
+                    .name("erez-transcript-task".into())
+                    .spawn(move || {
+                        match tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                        {
+                            Ok(runtime) => {
+                                let _ = runtime.block_on(process_transcript(state, transcript));
+                            }
+                            Err(err) => {
+                                error!("failed to start transcript task runtime: {err}");
+                            }
+                        }
+                    });
             }
         })
     {
@@ -1541,9 +1569,44 @@ async fn process_transcript_with_replies(
         json!({ "transcript": transcript }),
     );
 
+    if is_stop_command(&transcript) {
+        let generation = state.cancel_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        emit(
+            &state,
+            EventKind::Status,
+            "stop command accepted",
+            json!({ "cancel_generation": generation }),
+        );
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "cancelled": true,
+                "cancel_generation": generation
+            })),
+        );
+    }
+
+    if state.active_command.swap(true, Ordering::SeqCst) {
+        emit(
+            &state,
+            EventKind::CommandUnrecognized,
+            "assistant is busy; say wake phrase plus stop to cancel",
+            json!({ "transcript": transcript }),
+        );
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                json!({ "error": "assistant busy", "hint": "say wake phrase plus stop to cancel" }),
+            ),
+        );
+    }
+    let _active_guard = ActiveCommandGuard::new(state.active_command.clone());
+    let cancel_generation = state.cancel_generation.load(Ordering::SeqCst);
+
     let config = state.config.read().await.clone();
     if let Some(result) = resolve_system_intent(&transcript) {
-        return process_intent_result(&state, Ok(result), replies).await;
+        return process_intent_result(&state, Ok(result), replies, cancel_generation).await;
     }
 
     let registry = state.registry.read().await.clone();
@@ -1555,7 +1618,33 @@ async fn process_transcript_with_replies(
         })
         .await;
 
-    process_intent_result(&state, result, replies).await
+    process_intent_result(&state, result, replies, cancel_generation).await
+}
+
+struct ActiveCommandGuard {
+    active: Arc<AtomicBool>,
+}
+
+impl ActiveCommandGuard {
+    fn new(active: Arc<AtomicBool>) -> Self {
+        Self { active }
+    }
+}
+
+impl Drop for ActiveCommandGuard {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::SeqCst);
+    }
+}
+
+fn is_stop_command(transcript: &str) -> bool {
+    let normalized = erez_core::normalize::normalize_phrase(transcript);
+    STOP_COMMAND_ALIASES.iter().any(|alias| {
+        let alias = erez_core::normalize::normalize_phrase(alias);
+        normalized == alias
+            || normalized.split_whitespace().any(|token| token == alias)
+            || normalized.contains(&alias)
+    })
 }
 
 fn resolve_system_intent(transcript: &str) -> Option<IntentResult> {
@@ -1589,6 +1678,7 @@ async fn process_intent_result(
     state: &AppState,
     result: Result<IntentResult, erez_core::intent::IntentError>,
     replies: Vec<String>,
+    cancel_generation: u64,
 ) -> (StatusCode, Json<Value>) {
     match result {
         Ok(result) => {
@@ -1605,7 +1695,11 @@ async fn process_intent_result(
                 } = &resolved.action
                 {
                     let registry = state.registry.read().await.clone();
-                    let runner = ScenarioRunner::new(registry, state.executor.clone());
+                    let runner = ScenarioRunner::new(registry, state.executor.clone())
+                        .cancel_on_generation_change(
+                            state.cancel_generation.clone(),
+                            cancel_generation,
+                        );
                     let mut static_replies = StaticReplyProvider::new(replies);
                     let mut no_replies = NoopReplyProvider;
                     let reply_provider: &mut dyn erez_core::scenario::ReplyProvider =
@@ -2432,6 +2526,8 @@ mod tests {
             executor: ActionExecutor,
             listener: Arc::new(RwLock::new(None)),
             audio_playback_until_ms: Arc::new(AtomicU64::new(0)),
+            cancel_generation: Arc::new(AtomicU64::new(0)),
+            active_command: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -2607,6 +2703,30 @@ payload = {}
         assert_eq!(second.kind, EventKind::IntentResolved);
         let third = events.recv().await.unwrap();
         assert_eq!(third.kind, EventKind::ActionExecuted);
+    }
+
+    #[tokio::test]
+    async fn listen_once_stop_command_increments_cancel_generation() {
+        let state = test_state(ErezConfig::default());
+        let cancel_generation = state.cancel_generation.clone();
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/listen/once")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"transcript":"комп стоп"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["cancelled"], true);
+        assert_eq!(cancel_generation.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

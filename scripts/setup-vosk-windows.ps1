@@ -19,12 +19,17 @@ New-Item -ItemType Directory -Force -Path $ExtractDir | Out-Null
 Expand-Archive -Path $Archive -DestinationPath $ExtractDir
 
 $Dll = Get-ChildItem -Path $ExtractDir -Recurse -Filter "vosk.dll" | Select-Object -First 1
-$Lib = Get-ChildItem -Path $ExtractDir -Recurse -Filter "libvosk.lib" | Select-Object -First 1
+$Lib = Get-ChildItem -Path $ExtractDir -Recurse -Include "libvosk.lib","vosk.lib" | Select-Object -First 1
 $Header = Get-ChildItem -Path $ExtractDir -Recurse -Filter "vosk_api.h" | Select-Object -First 1
 if (-not $Dll) { throw "vosk.dll was not found in archive" }
 
 Copy-Item $Dll.FullName (Join-Path $VendorDir "lib\vosk.dll") -Force
-if ($Lib) { Copy-Item $Lib.FullName (Join-Path $VendorDir "lib\libvosk.lib") -Force }
+if ($Lib) {
+    Copy-Item $Lib.FullName (Join-Path $VendorDir "lib\libvosk.lib") -Force
+    Copy-Item $Lib.FullName (Join-Path $VendorDir "lib\vosk.lib") -Force
+} else {
+    Write-Warning "Vosk import library was not found. Rust linking may fail until libvosk.lib is present."
+}
 if ($Header) { Copy-Item $Header.FullName (Join-Path $VendorDir "include\vosk_api.h") -Force }
 
 Write-Host "Installed native Vosk library into $(Join-Path $VendorDir 'lib')"

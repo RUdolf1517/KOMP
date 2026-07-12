@@ -18,8 +18,8 @@ min_confidence = 0.55
 
 [audio]
 sample_rate_hz = 16000
-command_timeout_ms = 5000
-end_silence_ms = 700
+command_timeout_ms = 10000
+end_silence_ms = 1200
 command_preroll_ms = 300
 
 [sounds]

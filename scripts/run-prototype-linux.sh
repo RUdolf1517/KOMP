@@ -61,8 +61,10 @@ need_cmd cargo
 need_cmd curl
 need_cmd unzip
 need_cmd xdg-open
+need_cmd git
 
 source "$ROOT_DIR/scripts/ensure-rust.sh"
+"$ROOT_DIR/scripts/auto-update-git.sh"
 
 if [[ ! -f "$VENDOR_DIR/lib/libvosk.so" ]]; then
   "$ROOT_DIR/scripts/setup-vosk-linux.sh"
@@ -102,8 +104,8 @@ extra_args = ["-nt"]
 
 [audio]
 sample_rate_hz = 16000
-command_timeout_ms = 7000
-end_silence_ms = 900
+command_timeout_ms = 10000
+end_silence_ms = 1200
 command_preroll_ms = 300
 
 [sounds]

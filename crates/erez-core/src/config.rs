@@ -86,8 +86,8 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             sample_rate_hz: 16_000,
-            command_timeout_ms: 5_000,
-            end_silence_ms: 700,
+            command_timeout_ms: 10_000,
+            end_silence_ms: 1_200,
             command_preroll_ms: 300,
         }
     }

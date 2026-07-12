@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 use thiserror::Error;
 
@@ -92,6 +96,7 @@ pub struct ScenarioRunner {
     registry: PluginRegistry,
     executor: ActionExecutor,
     dry_run: bool,
+    cancel_generation: Option<(Arc<AtomicU64>, u64)>,
 }
 
 impl ScenarioRunner {
@@ -100,11 +105,21 @@ impl ScenarioRunner {
             registry,
             executor,
             dry_run: false,
+            cancel_generation: None,
         }
     }
 
     pub fn dry_run(mut self, dry_run: bool) -> Self {
         self.dry_run = dry_run;
+        self
+    }
+
+    pub fn cancel_on_generation_change(
+        mut self,
+        generation: Arc<AtomicU64>,
+        expected: u64,
+    ) -> Self {
+        self.cancel_generation = Some((generation, expected));
         self
     }
 
@@ -137,6 +152,15 @@ impl ScenarioRunner {
         let mut visited = HashSet::new();
 
         while let Some(step_id) = current {
+            if self.is_cancelled() {
+                run.steps.push(ScenarioStepResult {
+                    id: "scenario_cancelled".into(),
+                    skipped: false,
+                    success: false,
+                    message: "cancelled by stop command".into(),
+                });
+                break;
+            }
             if !visited.insert(step_id.clone()) {
                 return Err(ScenarioError::LoopDetected(step_id));
             }
@@ -268,6 +292,13 @@ impl ScenarioRunner {
         }
 
         Ok(outcome)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel_generation
+            .as_ref()
+            .map(|(generation, expected)| generation.load(Ordering::SeqCst) != *expected)
+            .unwrap_or(false)
     }
 
     fn execute_or_dry_run(&self, action: &Action) -> Result<ActionOutcome, ActionError> {
