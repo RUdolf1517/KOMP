@@ -2,7 +2,7 @@ use crate::plugins::Action;
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use std::path::Path;
-use std::{collections::HashMap, fs::File, io::BufReader, process::Command};
+use std::{collections::HashMap, fmt, fs::File, io::BufReader, process::Command, sync::Arc};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -25,10 +25,37 @@ pub struct ActionOutcome {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ActionExecutor;
+pub trait TextSpeaker: Send + Sync {
+    fn speak(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+        speed: f32,
+        cache: bool,
+    ) -> Result<ActionOutcome, ActionError>;
+}
+
+#[derive(Clone, Default)]
+pub struct ActionExecutor {
+    text_speaker: Option<Arc<dyn TextSpeaker>>,
+}
+
+impl fmt::Debug for ActionExecutor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ActionExecutor")
+            .field("text_speaker", &self.text_speaker.is_some())
+            .finish()
+    }
+}
 
 impl ActionExecutor {
+    pub fn with_text_speaker(text_speaker: Arc<dyn TextSpeaker>) -> Self {
+        Self {
+            text_speaker: Some(text_speaker),
+        }
+    }
+
     pub fn execute(&self, action: &Action) -> Result<ActionOutcome, ActionError> {
         match action {
             Action::EmitEvent { event, .. } => Ok(ActionOutcome {
@@ -42,6 +69,16 @@ impl ActionExecutor {
             Action::OpenApp { app } => run_open_app(app),
             Action::SetVolume { level, delta } => run_set_volume(*level, *delta),
             Action::PlaySound { file } | Action::SaySound { file } => run_play_sound(file),
+            Action::SayText {
+                text,
+                voice,
+                speed,
+                cache,
+            } => self
+                .text_speaker
+                .as_ref()
+                .ok_or(ActionError::NotImplemented("say_text"))?
+                .speak(text, voice.as_deref(), *speed, *cache),
             Action::Ask { .. } | Action::WaitForReply { .. } => Ok(ActionOutcome {
                 executed: false,
                 message: "dialog actions must be executed by ScenarioRunner".into(),
@@ -77,6 +114,19 @@ pub fn apply_slots_to_action(action: &Action, slots: &HashMap<String, String>) -
         },
         Action::SaySound { file } => Action::SaySound {
             file: interpolate_slots(file, slots, false),
+        },
+        Action::SayText {
+            text,
+            voice,
+            speed,
+            cache,
+        } => Action::SayText {
+            text: interpolate_slots(text, slots, false),
+            voice: voice
+                .as_ref()
+                .map(|voice| interpolate_slots(voice, slots, false)),
+            speed: *speed,
+            cache: *cache,
         },
         Action::Shell {
             command,
@@ -119,10 +169,17 @@ pub fn apply_slots_to_action(action: &Action, slots: &HashMap<String, String>) -
             level: *level,
             delta: *delta,
         },
-        Action::Ask { sound, reply_slot } => Action::Ask {
+        Action::Ask {
+            sound,
+            text,
+            reply_slot,
+        } => Action::Ask {
             sound: sound
                 .as_ref()
                 .map(|sound| interpolate_slots(sound, slots, false)),
+            text: text
+                .as_ref()
+                .map(|text| interpolate_slots(text, slots, false)),
             reply_slot: reply_slot.clone(),
         },
         Action::WaitForReply { reply_slot } => Action::WaitForReply {
@@ -626,6 +683,25 @@ fn command_exists(command: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
+    struct RecordingSpeaker(std::sync::Mutex<Vec<String>>);
+
+    impl TextSpeaker for RecordingSpeaker {
+        fn speak(
+            &self,
+            text: &str,
+            _voice: Option<&str>,
+            _speed: f32,
+            _cache: bool,
+        ) -> Result<ActionOutcome, ActionError> {
+            self.0.lock().unwrap().push(text.into());
+            Ok(ActionOutcome {
+                executed: true,
+                message: "spoken".into(),
+            })
+        }
+    }
+
     #[test]
     fn shell_is_disabled_by_default() {
         let action = Action::Shell {
@@ -634,7 +710,7 @@ mod tests {
             enabled: false,
         };
         assert!(matches!(
-            ActionExecutor.execute(&action),
+            ActionExecutor::default().execute(&action),
             Err(ActionError::ShellDisabled)
         ));
     }
@@ -645,7 +721,7 @@ mod tests {
             url: "file:///tmp/nope".into(),
         };
         assert!(matches!(
-            ActionExecutor.execute(&action),
+            ActionExecutor::default().execute(&action),
             Err(ActionError::Invalid(_))
         ));
     }
@@ -664,6 +740,23 @@ mod tests {
                 url: "https://www.google.com/search?q=%D1%87%D1%82%D0%BE+%D0%BD%D0%B8%D0%B1%D1%83%D0%B4%D1%8C".into()
             }
         );
+    }
+
+    #[test]
+    fn say_text_interpolates_slots_and_uses_speaker() {
+        let speaker = Arc::new(RecordingSpeaker(std::sync::Mutex::new(Vec::new())));
+        let executor = ActionExecutor::with_text_speaker(speaker.clone());
+        let action = apply_slots_to_action(
+            &Action::SayText {
+                text: "Заряд {{percent}} процентов".into(),
+                voice: Some("komp".into()),
+                speed: 1.0,
+                cache: true,
+            },
+            &HashMap::from([("percent".into(), "57".into())]),
+        );
+        assert!(executor.execute(&action).unwrap().executed);
+        assert_eq!(speaker.0.lock().unwrap().as_slice(), ["Заряд 57 процентов"]);
     }
 
     #[cfg(target_os = "macos")]

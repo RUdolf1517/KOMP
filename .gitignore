@@ -11,3 +11,13 @@ komp.toml
 
 # User-created local scenarios are runtime data. Keep examples in plugins.example/.
 plugins.user/
+
+# Local TTS runtime, downloaded models, cloned voice profiles, and generated speech.
+vendor/cosyvoice/
+voices/
+cache/tts/
+services/cosyvoice/__pycache__/
+scripts/__pycache__/
+
+# Local voice datasets and source archives.
+*.7z

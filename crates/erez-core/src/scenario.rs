@@ -257,11 +257,26 @@ impl ScenarioRunner {
         }
 
         let outcome = match &step.action {
-            Action::Ask { sound, reply_slot } => {
+            Action::Ask {
+                sound,
+                text,
+                reply_slot,
+            } => {
                 if let Some(sound) = sound {
                     self.execute_or_dry_run(&Action::PlaySound {
                         file: sound.clone(),
                     })?;
+                }
+                if let Some(text) = text {
+                    self.execute_or_dry_run_with_slots(
+                        &Action::SayText {
+                            text: text.clone(),
+                            voice: None,
+                            speed: 1.0,
+                            cache: true,
+                        },
+                        &context.slots,
+                    )?;
                 }
                 let reply = reply_provider.next_reply(reply_slot).unwrap_or_default();
                 context.last_reply = Some(reply.clone());
@@ -325,6 +340,12 @@ impl ScenarioRunner {
 pub fn validate_action(action: &Action) -> Result<(), ActionError> {
     match action {
         Action::PlaySound { file } | Action::SaySound { file } => validate_sound_path(file),
+        Action::SayText { text, .. } if text.trim().is_empty() => Err(ActionError::Invalid(
+            "say_text requires non-empty text".into(),
+        )),
+        Action::SayText { speed, .. } if !(0.5..=2.0).contains(speed) => Err(ActionError::Invalid(
+            "say_text speed must be between 0.5 and 2.0".into(),
+        )),
         Action::SetVolume { level, delta } if level.is_none() && delta.is_none() => Err(
             ActionError::Invalid("set_volume requires `level` or `delta`".into()),
         ),
@@ -460,6 +481,7 @@ mod tests {
                         when: None,
                         action: Action::Ask {
                             sound: None,
+                            text: None,
                             reply_slot: "browser".into(),
                         },
                         on_success: None,
@@ -516,7 +538,7 @@ mod tests {
 
     #[test]
     fn ask_stores_reply_and_branches() {
-        let runner = ScenarioRunner::new(registry(), ActionExecutor).dry_run(true);
+        let runner = ScenarioRunner::new(registry(), ActionExecutor::default()).dry_run(true);
         let mut replies = StaticReplyProvider::new(vec!["chrome пожалуйста".into()]);
         let run = runner
             .run("demo", "branch", HashMap::new(), &mut replies)
@@ -531,7 +553,7 @@ mod tests {
         let mut manifest = registry().manifests().first().unwrap().clone();
         manifest.scenarios[0].sounds.success = Some("sounds/system/success.mp3".into());
         let registry = PluginRegistry::from_manifests(vec![manifest]);
-        let runner = ScenarioRunner::new(registry, ActionExecutor).dry_run(true);
+        let runner = ScenarioRunner::new(registry, ActionExecutor::default()).dry_run(true);
         let mut replies = StaticReplyProvider::new(vec!["chrome".into()]);
         let run = runner
             .run("demo", "branch", HashMap::new(), &mut replies)

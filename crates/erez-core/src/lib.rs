@@ -10,9 +10,9 @@ pub mod plugins;
 pub mod scenario;
 pub mod stt;
 
-pub use config::{ErezConfig, Language, LmStudioConfig, ModelConfig};
+pub use config::{ErezConfig, Language, LmStudioConfig, ModelConfig, TtsConfig};
 pub use events::{AssistantEvent, EventKind};
-pub use executor::{apply_slots_to_action, ActionExecutor, ActionOutcome};
+pub use executor::{apply_slots_to_action, ActionExecutor, ActionOutcome, TextSpeaker};
 pub use intent::{
     DefaultIntentResolver, IntentRequest, IntentResolver, IntentResult, ResolvedAction,
 };

@@ -66,6 +66,7 @@ if (-not (Test-Path (Join-Path $VendorDir "lib\vosk.dll")) -or -not (Test-Path (
 Download-Model "ru" "https://alphacephei.com/vosk/models/vosk-model-small-ru-$RuModelVersion.zip"
 Download-Model "en" "https://alphacephei.com/vosk/models/vosk-model-small-en-us-$EnModelVersion.zip"
 
+if (-not (Test-Path $ConfigPath)) {
 @"
 wake_phrase = "комп"
 wake_phrases = ["комп", "компьютер"]
@@ -93,6 +94,19 @@ language = "ru"
 timeout_ms = 8000
 extra_args = ["-nt"]
 
+[tts]
+enabled = false
+provider = "cosyvoice"
+base_url = "http://127.0.0.1:50000"
+model_path = "vendor/cosyvoice/models/Fun-CosyVoice3-0.5B"
+voice_id = "komp"
+autostart = true
+preload = true
+timeout_ms = 180000
+cache_enabled = true
+device = "auto"
+playback_mode = "buffered"
+
 [audio]
 sample_rate_hz = 16000
 command_timeout_ms = 10000
@@ -105,6 +119,9 @@ shutdown = "sounds/system/shutdown.mp3"
 wake = "sounds/system/listening.mp3"
 listening = "sounds/system/listening.mp3"
 "@ | Set-Content -Encoding UTF8 $ConfigPath
+} else {
+    Write-Host "Using existing config at $ConfigPath"
+}
 
 $env:PATH = "$(Join-Path $VendorDir 'lib');$env:PATH"
 $env:LIB = "$(Join-Path $VendorDir 'lib');$env:LIB"

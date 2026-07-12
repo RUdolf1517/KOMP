@@ -52,6 +52,10 @@ input:focus, textarea:focus, select:focus { border-color: var(--blue); }
 .step { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #09182a; }
 .step-head { display: grid; grid-template-columns: minmax(0, 1fr) 150px auto; gap: 8px; align-items: end; margin-bottom: 10px; }
 .action-fields, .conditions, .branches { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.action-fields textarea { min-height: 112px; }
+.slot-picker { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+.slot-picker .chip { cursor: pointer; }
+.status-strip { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 12px; background: #081525; color: var(--ok); }
 .flow { display: grid; gap: 7px; color: var(--muted); font-size: 13px; }
 .flow-row { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #081525; }
 .errors { color: var(--danger); display: grid; gap: 5px; }

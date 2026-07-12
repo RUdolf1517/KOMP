@@ -61,6 +61,44 @@ pub struct WhisperConfig {
     pub extra_args: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TtsConfig {
+    pub enabled: bool,
+    pub provider: String,
+    pub base_url: String,
+    pub model_path: PathBuf,
+    pub voice_id: String,
+    pub autostart: bool,
+    pub preload: bool,
+    pub timeout_ms: u64,
+    pub cache_enabled: bool,
+    pub device: String,
+    #[serde(default = "default_tts_playback_mode")]
+    pub playback_mode: String,
+}
+
+fn default_tts_playback_mode() -> String {
+    "buffered".into()
+}
+
+impl Default for TtsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "cosyvoice".into(),
+            base_url: "http://127.0.0.1:50000".into(),
+            model_path: PathBuf::from("vendor/cosyvoice/models/Fun-CosyVoice3-0.5B"),
+            voice_id: "komp".into(),
+            autostart: true,
+            preload: true,
+            timeout_ms: 180_000,
+            cache_enabled: true,
+            device: "auto".into(),
+            playback_mode: default_tts_playback_mode(),
+        }
+    }
+}
+
 impl Default for WhisperConfig {
     fn default() -> Self {
         Self {
@@ -123,6 +161,8 @@ pub struct ErezConfig {
     pub lmstudio: LmStudioConfig,
     #[serde(default)]
     pub whisper: WhisperConfig,
+    #[serde(default)]
+    pub tts: TtsConfig,
     pub audio: AudioConfig,
     #[serde(default)]
     pub sounds: SoundConfig,
@@ -140,6 +180,7 @@ impl Default for ErezConfig {
             models: ModelConfig::default(),
             lmstudio: LmStudioConfig::default(),
             whisper: WhisperConfig::default(),
+            tts: TtsConfig::default(),
             audio: AudioConfig::default(),
             sounds: SoundConfig::default(),
             plugin_dirs: vec![PathBuf::from("plugins.example")],
@@ -199,5 +240,60 @@ mod tests {
         assert!(matches_wake_phrase("эй рез открой браузер", &grammar));
         assert!(matches_wake_phrase("эрез открой браузер", &grammar));
         assert!(grammar.iter().any(|phrase| phrase == "ерез"));
+    }
+
+    #[test]
+    fn old_configs_receive_disabled_cosyvoice_defaults() {
+        let config: ErezConfig = toml::from_str(
+            r#"
+wake_phrase = "комп"
+wake_phrases = []
+wake_grammar = ["комп"]
+primary_language = "ru"
+english_fallback = true
+plugin_dirs = []
+
+[models]
+ru_vosk_path = "ru"
+en_vosk_path = "en"
+
+[lmstudio]
+enabled = false
+base_url = "http://localhost:1234/v1"
+model = "local"
+timeout_ms = 2500
+min_confidence = 0.55
+
+[audio]
+sample_rate_hz = 16000
+command_timeout_ms = 10000
+end_silence_ms = 1200
+command_preroll_ms = 300
+"#,
+        )
+        .unwrap();
+        assert!(!config.tts.enabled);
+        assert_eq!(config.tts.provider, "cosyvoice");
+    }
+
+    #[test]
+    fn old_tts_configs_default_to_buffered_playback() {
+        let config: TtsConfig = toml::from_str(
+            r#"
+enabled = true
+provider = "cosyvoice"
+base_url = "http://127.0.0.1:50000"
+model_path = "model"
+voice_id = "komp"
+autostart = true
+preload = true
+timeout_ms = 180000
+cache_enabled = true
+device = "auto"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.playback_mode, "buffered");
     }
 }

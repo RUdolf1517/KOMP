@@ -73,9 +73,20 @@ pub enum Action {
     SaySound {
         file: String,
     },
+    SayText {
+        text: String,
+        #[serde(default)]
+        voice: Option<String>,
+        #[serde(default = "default_tts_speed")]
+        speed: f32,
+        #[serde(default = "default_true")]
+        cache: bool,
+    },
     Ask {
         #[serde(default)]
         sound: Option<String>,
+        #[serde(default)]
+        text: Option<String>,
         reply_slot: String,
     },
     WaitForReply {
@@ -105,6 +116,14 @@ pub enum Action {
         #[serde(default)]
         payload: Value,
     },
+}
+
+fn default_tts_speed() -> f32 {
+    1.0
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

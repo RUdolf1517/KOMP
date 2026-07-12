@@ -152,7 +152,8 @@ async fn main() -> Result<()> {
                         .map(|manifest| manifest.id.clone())
                 })
                 .context("scenario not found in loaded plugins")?;
-            let runner = erez_core::ScenarioRunner::new(registry, ActionExecutor).dry_run(dry_run);
+            let runner = erez_core::ScenarioRunner::new(registry, ActionExecutor::default())
+                .dry_run(dry_run);
             let mut replies = erez_core::StaticReplyProvider::new(replies);
             let run = runner.run(&plugin_id, &id, Default::default(), &mut replies)?;
             println!("{}", serde_json::to_string_pretty(&run)?);
@@ -165,7 +166,7 @@ async fn main() -> Result<()> {
                 erez_core::scenario::validate_action(&action)?;
                 println!("valid sound: {}", path.display());
             } else {
-                let outcome = ActionExecutor.execute(&action)?;
+                let outcome = ActionExecutor::default().execute(&action)?;
                 println!("{}", serde_json::to_string_pretty(&outcome)?);
             }
         }
@@ -192,7 +193,7 @@ async fn main() -> Result<()> {
                 .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             if let Some(resolved) = result.resolved {
-                match ActionExecutor.execute(&resolved.action) {
+                match ActionExecutor::default().execute(&resolved.action) {
                     Ok(outcome) => println!("{}", serde_json::to_string_pretty(&outcome)?),
                     Err(err) => println!("action_not_executed: {err}"),
                 }

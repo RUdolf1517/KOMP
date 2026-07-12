@@ -1,3 +1,5 @@
+mod tts;
+
 use axum::{
     extract::{
         ws::{Message, WebSocket},
@@ -37,6 +39,7 @@ use tokio::sync::mpsc;
 use tokio::sync::{broadcast, RwLock};
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
+use tts::{TtsRuntime, VoiceUploadRequest};
 
 const AUDIO_PLAYBACK_INITIAL_GUARD_MS: u64 = 3_000;
 const SYSTEM_SOUND_EXTENSIONS: [&str; 3] = ["mp3", "wav", "ogg"];
@@ -90,6 +93,7 @@ const STOP_COMMAND_ALIASES: [&str; 8] = [
 #[derive(Clone)]
 struct AppState {
     config: Arc<RwLock<ErezConfig>>,
+    config_path: Option<PathBuf>,
     registry: Arc<RwLock<PluginRegistry>>,
     events: broadcast::Sender<AssistantEvent>,
     executor: ActionExecutor,
@@ -97,6 +101,7 @@ struct AppState {
     audio_playback_until_ms: Arc<AtomicU64>,
     cancel_generation: Arc<AtomicU64>,
     active_command: Arc<AtomicBool>,
+    tts: Arc<TtsRuntime>,
 }
 
 #[derive(Clone)]
@@ -183,20 +188,34 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let config = load_initial_config();
+    let config_path = discover_config_path();
+    let config = load_initial_config(config_path.as_deref());
     let startup_sound = config.sounds.startup.clone();
     let registry = load_registry(&config);
     let (events, _) = broadcast::channel(256);
+    let audio_playback_until_ms = Arc::new(AtomicU64::new(0));
+    let cancel_generation = Arc::new(AtomicU64::new(0));
+    let tts = Arc::new(TtsRuntime::new(
+        project_root(),
+        config.tts.clone(),
+        events.clone(),
+        audio_playback_until_ms.clone(),
+        cancel_generation.clone(),
+    ));
     let state = AppState {
         config: Arc::new(RwLock::new(config)),
+        config_path,
         registry: Arc::new(RwLock::new(registry)),
         events,
-        executor: ActionExecutor,
+        executor: ActionExecutor::with_text_speaker(tts.clone()),
         listener: Arc::new(RwLock::new(None)),
-        audio_playback_until_ms: Arc::new(AtomicU64::new(0)),
-        cancel_generation: Arc::new(AtomicU64::new(0)),
+        audio_playback_until_ms,
+        cancel_generation,
         active_command: Arc::new(AtomicBool::new(false)),
+        tts: tts.clone(),
     };
+
+    tts.autostart();
 
     emit(
         &state,
@@ -257,6 +276,14 @@ fn build_router(state: AppState) -> Router {
         .route("/listen/stop", post(listen_stop))
         .route("/config", get(get_config).post(update_config))
         .route("/lmstudio/test", post(lmstudio_test))
+        .route("/tts/status", get(tts_status))
+        .route("/tts/install", post(tts_install))
+        .route("/tts/start", post(tts_start))
+        .route("/tts/stop", post(tts_stop))
+        .route("/tts/test", post(tts_test))
+        .route("/tts/speak", post(tts_test))
+        .route("/tts/voices", get(tts_voices).post(tts_voice_upload))
+        .route("/tts/voices/:id", axum::routing::delete(tts_voice_delete))
         .route("/models", get(models))
         .route("/scenarios", get(scenarios_list).post(scenarios_create))
         .route(
@@ -276,27 +303,7 @@ fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-fn load_initial_config() -> ErezConfig {
-    let path = std::env::var_os("KOMP_CONFIG")
-        .or_else(|| std::env::var_os("EREZ_CONFIG"))
-        .map(PathBuf::from)
-        .or_else(|| {
-            let path = PathBuf::from("komp.toml");
-            path.exists().then_some(path)
-        })
-        .or_else(|| {
-            let path = PathBuf::from("erez.toml");
-            path.exists().then_some(path)
-        })
-        .or_else(|| {
-            let path = PathBuf::from("komp.prototype.toml");
-            path.exists().then_some(path)
-        })
-        .or_else(|| {
-            let path = PathBuf::from("erez.prototype.toml");
-            path.exists().then_some(path)
-        });
-
+fn load_initial_config(path: Option<&Path>) -> ErezConfig {
     let Some(path) = path else {
         return ErezConfig::default();
     };
@@ -507,7 +514,7 @@ async fn scenarios_dry_run(
             Json(json!({ "error": "scenario not found" })),
         );
     };
-    let runner = ScenarioRunner::new(registry.clone(), ActionExecutor).dry_run(true);
+    let runner = ScenarioRunner::new(registry.clone(), ActionExecutor::default()).dry_run(true);
     let mut replies = NoopReplyProvider;
     match runner.run(&manifest.id, &id, HashMap::new(), &mut replies) {
         Ok(run) => (StatusCode::OK, Json(json!({ "run": run }))),
@@ -703,10 +710,156 @@ async fn update_config(
     State(state): State<AppState>,
     Json(config): Json<ErezConfig>,
 ) -> impl IntoResponse {
+    state.tts.update_config(config.tts.clone());
+    state.tts.autostart();
     *state.config.write().await = config.clone();
     *state.registry.write().await = load_registry(&config);
-    emit(&state, EventKind::Status, "config updated", json!({}));
+    let saved_to = state.config_path.clone().and_then(|path| {
+        config
+            .to_toml_string()
+            .ok()
+            .and_then(|content| fs::write(&path, content).ok().map(|_| path))
+    });
+    emit(
+        &state,
+        EventKind::Status,
+        "config updated",
+        json!({ "saved_to": saved_to.map(|path| path.display().to_string()) }),
+    );
     Json(config)
+}
+
+fn discover_config_path() -> Option<PathBuf> {
+    std::env::var_os("KOMP_CONFIG")
+        .or_else(|| std::env::var_os("EREZ_CONFIG"))
+        .map(PathBuf::from)
+        .or_else(|| {
+            [
+                "komp.toml",
+                "erez.toml",
+                "komp.prototype.toml",
+                "erez.prototype.toml",
+            ]
+            .into_iter()
+            .map(|name| project_root().join(name))
+            .find(|path| path.exists())
+        })
+}
+
+async fn tts_status(State(state): State<AppState>) -> impl IntoResponse {
+    let runtime = state.tts.clone();
+    match tokio::task::spawn_blocking(move || runtime.status()).await {
+        Ok(status) => (StatusCode::OK, Json(json!(status))),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn tts_install(State(state): State<AppState>) -> impl IntoResponse {
+    match state.tts.install() {
+        Ok(message) => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "ok": true, "message": message })),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err })),
+        ),
+    }
+}
+
+async fn tts_start(State(state): State<AppState>) -> impl IntoResponse {
+    let runtime = state.tts.clone();
+    match tokio::task::spawn_blocking(move || runtime.start()).await {
+        Ok(Ok(message)) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "message": message })),
+        ),
+        Ok(Err(err)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn tts_stop(State(state): State<AppState>) -> impl IntoResponse {
+    state.tts.stop();
+    Json(json!({ "ok": true }))
+}
+
+#[derive(Debug, Deserialize)]
+struct TtsSpeakRequest {
+    text: String,
+    #[serde(default)]
+    voice: Option<String>,
+    #[serde(default = "default_tts_speed")]
+    speed: f32,
+    #[serde(default = "default_true")]
+    cache: bool,
+}
+
+fn default_tts_speed() -> f32 {
+    1.0
+}
+fn default_true() -> bool {
+    true
+}
+
+async fn tts_test(
+    State(state): State<AppState>,
+    Json(request): Json<TtsSpeakRequest>,
+) -> impl IntoResponse {
+    let runtime = state.tts.clone();
+    match tokio::task::spawn_blocking(move || {
+        runtime.test_speak_text(
+            &request.text,
+            request.voice.as_deref(),
+            request.speed,
+            request.cache,
+        )
+    })
+    .await
+    {
+        Ok(Ok(outcome)) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "outcome": outcome })),
+        ),
+        Ok(Err(err)) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": err }))),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn tts_voices(State(state): State<AppState>) -> impl IntoResponse {
+    Json(json!({ "voices": state.tts.voices() }))
+}
+
+async fn tts_voice_upload(
+    State(state): State<AppState>,
+    Json(request): Json<VoiceUploadRequest>,
+) -> impl IntoResponse {
+    match state.tts.save_voice(request) {
+        Ok(voice) => (
+            StatusCode::CREATED,
+            Json(json!({ "ok": true, "voice": voice })),
+        ),
+        Err(err) => (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))),
+    }
+}
+
+async fn tts_voice_delete(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    match state.tts.delete_voice(&id) {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Err(err) => (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))),
+    }
 }
 
 async fn lmstudio_test(
@@ -1481,7 +1634,7 @@ fn play_configured_sound_async(
         AUDIO_PLAYBACK_INITIAL_GUARD_MS,
     );
     std::thread::spawn(move || {
-        match ActionExecutor.execute(&Action::PlaySound { file: file.clone() }) {
+        match ActionExecutor::default().execute(&Action::PlaySound { file: file.clone() }) {
             Ok(outcome) => info!(
                 sound = %file,
                 message = %outcome.message,
@@ -1505,7 +1658,7 @@ fn play_configured_sound_blocking(label: &str, file: Option<&str>, guard: Option
         return;
     };
     mark_audio_playback(guard, AUDIO_PLAYBACK_INITIAL_GUARD_MS);
-    match ActionExecutor.execute(&Action::PlaySound {
+    match ActionExecutor::default().execute(&Action::PlaySound {
         file: file.to_string(),
     }) {
         Ok(outcome) => info!(
@@ -1683,6 +1836,7 @@ async fn process_intent_result(
     match result {
         Ok(result) => {
             if let Some(resolved) = &result.resolved {
+                let mut action_succeeded = false;
                 emit(
                     &state,
                     EventKind::IntentResolved,
@@ -1719,6 +1873,11 @@ async fn process_intent_result(
                         reply_provider,
                     ) {
                         Ok(run) => {
+                            action_succeeded = run
+                                .steps
+                                .iter()
+                                .filter(|step| !step.skipped)
+                                .all(|step| step.success);
                             mark_audio_playback(
                                 Some(state.audio_playback_until_ms.as_ref()),
                                 AUDIO_PLAYBACK_SETTLE_GUARD_MS,
@@ -1772,6 +1931,7 @@ async fn process_intent_result(
                         }),
                     );
                     announce_battery_status(state);
+                    action_succeeded = true;
                 } else {
                     let action = apply_slots_to_action(&resolved.action, &resolved.slots);
                     if matches!(action, Action::PlaySound { .. } | Action::SaySound { .. }) {
@@ -1782,6 +1942,7 @@ async fn process_intent_result(
                     }
                     match state.executor.execute(&action) {
                         Ok(outcome) => {
+                            action_succeeded = outcome.executed;
                             if matches!(action, Action::PlaySound { .. } | Action::SaySound { .. })
                             {
                                 mark_audio_playback(
@@ -1810,6 +1971,28 @@ async fn process_intent_result(
                                 EventKind::Error,
                                 "action execution failed",
                                 json!({ "error": err.to_string() }),
+                            );
+                        }
+                    }
+                }
+                if action_succeeded {
+                    if let Some(text) = resolved
+                        .speak
+                        .as_deref()
+                        .filter(|text| !text.trim().is_empty())
+                    {
+                        let runtime = state.tts.clone();
+                        let text_owned = text.to_string();
+                        let speech = tokio::task::spawn_blocking(move || {
+                            runtime.speak_text(&text_owned, None, 1.0, true)
+                        })
+                        .await;
+                        if let Err(err) = speech.unwrap_or_else(|err| Err(err.to_string())) {
+                            emit(
+                                state,
+                                EventKind::Error,
+                                "LM Studio response speech failed",
+                                json!({ "error": err, "text": text }),
                             );
                         }
                     }
@@ -2143,11 +2326,29 @@ fn validate_action_for_ui(action: &Action, errors: &mut Vec<String>) {
         Action::PlaySound { file } | Action::SaySound { file } => {
             validate_sound_ref(Some(file), errors);
         }
-        Action::Ask { sound, reply_slot } => {
+        Action::Ask {
+            sound,
+            text,
+            reply_slot,
+        } => {
             if reply_slot.trim().is_empty() {
                 errors.push("ask requires reply_slot".into());
             }
             validate_sound_ref(sound.as_deref(), errors);
+            if sound.is_some() && text.is_some() {
+                errors.push("ask must use either sound or text, not both".into());
+            }
+            if text.as_deref().is_some_and(|value| value.trim().is_empty()) {
+                errors.push("ask text cannot be empty".into());
+            }
+        }
+        Action::SayText { text, speed, .. } => {
+            if text.trim().is_empty() {
+                errors.push("say_text requires text".into());
+            }
+            if !(0.5..=2.0).contains(speed) {
+                errors.push("say_text speed must be between 0.5 and 2.0".into());
+            }
         }
         Action::WaitForReply { reply_slot } if reply_slot.trim().is_empty() => {
             errors.push("wait_for_reply requires reply_slot".into())
@@ -2517,17 +2718,32 @@ mod tests {
     }
 
     fn test_state(config: ErezConfig) -> AppState {
+        test_state_with_root(config, project_root())
+    }
+
+    fn test_state_with_root(config: ErezConfig, root: PathBuf) -> AppState {
         let registry = load_registry(&config);
         let (events, _) = broadcast::channel(32);
+        let audio_playback_until_ms = Arc::new(AtomicU64::new(0));
+        let cancel_generation = Arc::new(AtomicU64::new(0));
+        let tts = Arc::new(TtsRuntime::new(
+            root,
+            config.tts.clone(),
+            events.clone(),
+            audio_playback_until_ms.clone(),
+            cancel_generation.clone(),
+        ));
         AppState {
             config: Arc::new(RwLock::new(config)),
+            config_path: None,
             registry: Arc::new(RwLock::new(registry)),
             events,
-            executor: ActionExecutor,
+            executor: ActionExecutor::with_text_speaker(tts.clone()),
             listener: Arc::new(RwLock::new(None)),
-            audio_playback_until_ms: Arc::new(AtomicU64::new(0)),
-            cancel_generation: Arc::new(AtomicU64::new(0)),
+            audio_playback_until_ms,
+            cancel_generation,
             active_command: Arc::new(AtomicBool::new(false)),
+            tts,
         }
     }
 
@@ -2553,6 +2769,78 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         assert_eq!(body["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn tts_voice_api_creates_lists_and_deletes_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("voice.wav");
+        let mut writer = hound::WavWriter::create(
+            &input,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for index in 0..64_000 {
+            writer
+                .write_sample((((index as f32 / 17.0).sin()) * 10_000.0) as i16)
+                .unwrap();
+        }
+        writer.finalize().unwrap();
+        let request = json!({
+            "id": "komp_api",
+            "prompt_text": "Точная фраза для теста",
+            "file_name": "voice.wav",
+            "data_base64": general_purpose::STANDARD.encode(fs::read(input).unwrap())
+        });
+        let app = build_router(test_state_with_root(
+            ErezConfig::default(),
+            dir.path().to_path_buf(),
+        ));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/tts/voices")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert!(dir.path().join("voices/komp_api/voice.toml").exists());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tts/voices")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = json_body(response).await;
+        assert_eq!(body["voices"][0]["id"], "komp_api");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/tts/voices/komp_api")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!dir.path().join("voices/komp_api").exists());
     }
 
     #[tokio::test]
@@ -2617,7 +2905,11 @@ mod tests {
 
     #[tokio::test]
     async fn models_reflect_config_update() {
-        let app = build_router(test_state(ErezConfig::default()));
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("komp.toml");
+        let mut state = test_state(ErezConfig::default());
+        state.config_path = Some(config_path.clone());
+        let app = build_router(state);
         let mut config = ErezConfig::default();
         config.models.ru_vosk_path = Some(PathBuf::from("/models/ru"));
         config.models.en_vosk_path = Some(PathBuf::from("/models/en"));
@@ -2648,6 +2940,9 @@ mod tests {
         let body = json_body(response).await;
         assert_eq!(body["ru_vosk_path"], "/models/ru");
         assert_eq!(body["en_vosk_path"], "/models/en");
+        let saved = fs::read_to_string(config_path).unwrap();
+        assert!(saved.contains("/models/ru"));
+        assert!(saved.contains("[tts]"));
     }
 
     #[tokio::test]

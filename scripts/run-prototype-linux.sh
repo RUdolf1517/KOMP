@@ -75,6 +75,7 @@ fi
 download_model "ru" "$RU_MODEL_URL"
 download_model "en" "$EN_MODEL_URL"
 
+if [[ ! -f "$CONFIG_PATH" ]]; then
 cat > "$CONFIG_PATH" <<EOF
 wake_phrase = "комп"
 wake_phrases = ["комп", "компьютер"]
@@ -102,6 +103,19 @@ language = "ru"
 timeout_ms = 8000
 extra_args = ["-nt"]
 
+[tts]
+enabled = false
+provider = "cosyvoice"
+base_url = "http://127.0.0.1:50000"
+model_path = "vendor/cosyvoice/models/Fun-CosyVoice3-0.5B"
+voice_id = "komp"
+autostart = true
+preload = true
+timeout_ms = 180000
+cache_enabled = true
+device = "auto"
+playback_mode = "buffered"
+
 [audio]
 sample_rate_hz = 16000
 command_timeout_ms = 10000
@@ -114,6 +128,9 @@ shutdown = "sounds/system/shutdown.mp3"
 wake = "sounds/system/listening.mp3"
 listening = "sounds/system/listening.mp3"
 EOF
+else
+  echo "Using existing config at $CONFIG_PATH"
+fi
 
 export LD_LIBRARY_PATH="$VENDOR_DIR/lib:${LD_LIBRARY_PATH:-}"
 export LIBRARY_PATH="$VENDOR_DIR/lib:${LIBRARY_PATH:-}"
