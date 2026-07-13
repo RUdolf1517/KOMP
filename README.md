@@ -12,7 +12,7 @@ Rust backend skeleton for an offline RU/EN voice assistant with wake phrase `к�
 - System monitor commands for media pause/next/previous, scrolling, battery status, and optional battery/charging voice prompts.
 - Multiple wake phrases through `wake_phrases`, while legacy `wake_grammar` still works.
 - MP3/WAV/OGG sound playback actions via `play_sound` / `say_sound`.
-- Offline cloned-voice text-to-speech through the optional CosyVoice sidecar and `say_text` scenario action.
+- Offline cloned-voice text-to-speech through manually selected XTTS v2 or CosyVoice sidecars and the `say_text` scenario action.
 - LM Studio fallback client using `POST /v1/chat/completions`.
 - CPAL microphone capture behind the `audio-cpal` feature.
 - Vosk STT adapter behind the `vosk-stt` feature.
@@ -129,11 +129,13 @@ System scenarios from `plugins.example` are shown read-only. If `logo.png`, `log
 
 The app also has an `LM Studio` settings view. Use it to enable/disable fallback parsing, edit `base_url`, select a model returned by `POST /lmstudio/test`, and save the updated config back to the daemon.
 
-## CosyVoice Text To Speech
+## Dynamic Text To Speech
 
-Open the `Голос` view in the desktop app and click `Установить CosyVoice`. KOMP creates a local Python environment under `vendor/cosyvoice`, clones the Apache-2.0 CosyVoice runtime, and downloads `Fun-CosyVoice3-0.5B-2512`. Docker is not used. The model is loaded only after TTS has been enabled; CUDA is used when available on Windows/Linux and CPU is the portable fallback.
+The `Голос` view offers a manual choice between XTTS v2 and CosyVoice. XTTS is the faster option for low-power computers; CosyVoice remains the heavier quality option. Providers never fall back to one another automatically. Each provider has an isolated Python environment under `vendor/xtts` or `vendor/cosyvoice`, and Docker is not used.
 
-Create a cloned voice by uploading a clean 3-15 second MP3/WAV/OGG sample together with its exact transcript. Profiles are normalized to mono 16 kHz WAV and stored under `voices/<voice_id>/`; generated phrases are cached under `cache/tts/`. Both directories are local user data and ignored by git.
+XTTS uses the CPML non-commercial model license. Accept it explicitly in the app before installation. KOMP then downloads the model, keeps it loaded in the local sidecar, and selects CUDA, tested MPS, or CPU according to the configured device. Use `Проверить скорость` to see first-chunk latency and real-time factor for the current computer.
+
+Create a cloned voice by uploading a clean 3-15 second MP3/WAV/OGG sample. Its exact transcript is required by CosyVoice and optional for XTTS. Profiles are normalized to mono 16 kHz WAV and stored under `voices/<voice_id>/`; XTTS conditioning is cached next to the profile and regenerated when the sample changes. Generated phrases are separated by provider under `cache/tts/`. These directories are local user data and ignored by git.
 
 Dynamic speech can be added to a scenario directly in the editor or TOML:
 
@@ -151,7 +153,21 @@ id = "ask_browser"
 action = { type = "ask", text = "Какой браузер открыть?", reply_slot = "browser" }
 ```
 
-`ask` accepts either `text` or `sound`. Existing `play_sound`, `say_sound`, scenario sounds, and system MP3 files remain unchanged. While CosyVoice is generating or speaking, wake recognition is guarded from hearing KOMP itself; `комп стоп` cancels generation/playback and the remaining scenario steps.
+`ask` accepts either `text` or `sound`. Existing `play_sound`, `say_sound`, scenario sounds, and system MP3 files remain unchanged. While a TTS provider is generating or speaking, wake recognition is guarded from hearing KOMP itself; `комп стоп` cancels generation/playback and the remaining scenario steps.
+
+Scenario HTTP actions can pass slots in the URL, headers, and JSON body, then save either the full response or one JSON field for later steps:
+
+```toml
+[[scenarios.steps]]
+id = "load_value"
+action = { type = "http_request", method = "GET", url = "https://api.example.com/items/{{item_id}}", headers = { Authorization = "Bearer {{token}}" }, response_slot = "price", json_path = "data.price", timeout_ms = 10000 }
+
+[[scenarios.steps]]
+id = "speak_value"
+action = { type = "say_text", text = "Цена {{price}} рублей", speed = 1.0, cache = false }
+```
+
+The desktop editor exposes the same fields under `HTTP-запрос`. Built-in user scenarios `currency_converter` and `calculator` demonstrate result slots and mandatory dynamic replies. The currency converter uses the keyless [ExchangeRate-API](https://www.exchangerate-api.com) endpoint and therefore needs an internet connection; the calculator is fully local.
 
 ## Whisper Command STT
 

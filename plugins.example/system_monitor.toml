@@ -6,7 +6,19 @@ enabled = true
 id = "media_play_pause"
 aliases = ["пауза", "поставь на паузу", "продолжи", "продолжить", "play pause", "pause", "resume"]
 patterns = []
-action = { type = "hotkey", keys = ["space"] }
+action = { type = "media_control", command = "play_pause" }
+
+[[commands]]
+id = "media_seek_forward_30"
+aliases = ["перемотай вперед на тридцать секунд", "вперед на тридцать секунд", "промотай вперед", "пролистни вперед", "пролистнуть вперед", "пролистнуть на тридцать секунд", "seek forward thirty seconds"]
+patterns = []
+action = { type = "media_control", command = "seek_forward", seconds = 30 }
+
+[[commands]]
+id = "media_seek_backward_30"
+aliases = ["отмотай на тридцать секунд", "назад на тридцать секунд", "перемотай назад", "отмотай назад", "rewind thirty seconds"]
+patterns = []
+action = { type = "media_control", command = "seek_backward", seconds = 30 }
 
 [[commands]]
 id = "media_next"

@@ -11,10 +11,19 @@ primary_language = "ru"
 english_fallback = true
 plugin_dirs = ["plugins.example"]
 
+[wake]
+min_confidence = 0.84
+require_final = true
+
+[weather]
+base_location = "Москва"
+
 [models]
+ru_vosk_path = "vendor/vosk/models/ru"
+en_vosk_path = "vendor/vosk/models/en"
 
 [lmstudio]
-enabled = false
+enabled = true
 base_url = "http://localhost:1234/v1"
 timeout_ms = 2500
 min_confidence = 0.550000011920929
@@ -27,7 +36,7 @@ extra_args = ["-nt"]
 
 [tts]
 enabled = false
-provider = "cosyvoice"
+provider = "xtts"
 base_url = "http://127.0.0.1:50000"
 model_path = "vendor/cosyvoice/models/Fun-CosyVoice3-0.5B"
 voice_id = "komp"
@@ -38,6 +47,16 @@ cache_enabled = true
 device = "auto"
 playback_mode = "buffered"
 
+[tts.xtts]
+base_url = "http://127.0.0.1:50010"
+model = "tts_models/multilingual/multi-dataset/xtts_v2"
+language = "ru"
+device = "auto"
+autostart = true
+preload = true
+timeout_ms = 120000
+license_accepted = false
+
 [audio]
 sample_rate_hz = 16000
 command_timeout_ms = 10000
@@ -45,3 +64,6 @@ end_silence_ms = 1200
 command_preroll_ms = 300
 
 [sounds]
+startup = "sounds/system/startup.mp3"
+shutdown = "sounds/system/shutdown.mp3"
+wake = "sounds/system/wake.mp3"

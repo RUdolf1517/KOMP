@@ -62,6 +62,33 @@ pub struct WhisperConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct XttsConfig {
+    pub base_url: String,
+    pub model: String,
+    pub language: String,
+    pub device: String,
+    pub autostart: bool,
+    pub preload: bool,
+    pub timeout_ms: u64,
+    pub license_accepted: bool,
+}
+
+impl Default for XttsConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "http://127.0.0.1:50010".into(),
+            model: "tts_models/multilingual/multi-dataset/xtts_v2".into(),
+            language: "ru".into(),
+            device: "auto".into(),
+            autostart: true,
+            preload: true,
+            timeout_ms: 120_000,
+            license_accepted: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TtsConfig {
     pub enabled: bool,
     pub provider: String,
@@ -75,6 +102,8 @@ pub struct TtsConfig {
     pub device: String,
     #[serde(default = "default_tts_playback_mode")]
     pub playback_mode: String,
+    #[serde(default)]
+    pub xtts: XttsConfig,
 }
 
 fn default_tts_playback_mode() -> String {
@@ -95,6 +124,7 @@ impl Default for TtsConfig {
             cache_enabled: true,
             device: "auto".into(),
             playback_mode: default_tts_playback_mode(),
+            xtts: XttsConfig::default(),
         }
     }
 }
@@ -108,6 +138,34 @@ impl Default for WhisperConfig {
             language: Some("ru".to_string()),
             timeout_ms: 8_000,
             extra_args: vec!["-nt".to_string()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WakeConfig {
+    pub min_confidence: f32,
+    pub require_final: bool,
+}
+
+impl Default for WakeConfig {
+    fn default() -> Self {
+        Self {
+            min_confidence: 0.84,
+            require_final: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WeatherConfig {
+    pub base_location: String,
+}
+
+impl Default for WeatherConfig {
+    fn default() -> Self {
+        Self {
+            base_location: "Москва".into(),
         }
     }
 }
@@ -162,6 +220,10 @@ pub struct ErezConfig {
     #[serde(default)]
     pub whisper: WhisperConfig,
     #[serde(default)]
+    pub wake: WakeConfig,
+    #[serde(default)]
+    pub weather: WeatherConfig,
+    #[serde(default)]
     pub tts: TtsConfig,
     pub audio: AudioConfig,
     #[serde(default)]
@@ -180,6 +242,8 @@ impl Default for ErezConfig {
             models: ModelConfig::default(),
             lmstudio: LmStudioConfig::default(),
             whisper: WhisperConfig::default(),
+            wake: WakeConfig::default(),
+            weather: WeatherConfig::default(),
             tts: TtsConfig::default(),
             audio: AudioConfig::default(),
             sounds: SoundConfig::default(),
@@ -295,5 +359,22 @@ device = "auto"
         .unwrap();
 
         assert_eq!(config.playback_mode, "buffered");
+        assert_eq!(config.xtts, XttsConfig::default());
+    }
+
+    #[test]
+    fn xtts_config_round_trips_with_manual_provider_selection() {
+        let mut config = TtsConfig::default();
+        config.enabled = true;
+        config.provider = "xtts".into();
+        config.voice_id = "cave".into();
+        config.playback_mode = "streaming".into();
+        config.xtts.license_accepted = true;
+
+        let encoded = toml::to_string(&config).unwrap();
+        let decoded: TtsConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.provider, "xtts");
+        assert_eq!(decoded.voice_id, "cave");
+        assert!(decoded.xtts.license_accepted);
     }
 }

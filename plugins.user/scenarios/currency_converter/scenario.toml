@@ -1,0 +1,34 @@
+id = "user_currency_converter"
+name = "Курс валют"
+enabled = true
+commands = []
+
+[[scenarios]]
+id = "currency_converter"
+aliases = []
+patterns = [
+    "^(?:сколько(?: будет)? |переведи |конвертируй )?(?P<amount>.+?) (?P<from>руб(?:ль|ля|лей|ли|лях)|грив(?:на|ны|ен|не|нах|ну)|евро|доллар(?:а|ов|ы|ах)?|бакс(?:а|ов|ы)?|фунт(?:а|ов|ы|ах)?|тенге|юан(?:ь|я|ей|и)|лир(?:а|ы|ах)?|лари|злот(?:ый|ых|ые|ого)|франк(?:а|ов|и)?|иен(?:а|ы)?|йен(?:а|ы)?|usd|eur|rub|uah|gbp|kzt|byn|cny|try|gel|pln|chf|jpy) (?:в|на) (?P<to>руб(?:ль|ля|лей|ли|лях)|грив(?:на|ны|ен|не|нах|ну)|евро|доллар(?:а|ов|ы|ах)?|бакс(?:а|ов|ы)?|фунт(?:а|ов|ы|ах)?|тенге|юан(?:ь|я|ей|и)|лир(?:а|ы|ах)?|лари|злот(?:ый|ых|ые|ого)|франк(?:а|ов|и)?|иен(?:а|ы)?|йен(?:а|ы)?|usd|eur|rub|uah|gbp|kzt|byn|cny|try|gel|pln|chf|jpy)$",
+]
+priority = 50
+
+[[scenarios.steps]]
+id = "convert"
+action = { type = "convert_currency", amount = "{{amount}}", from = "{{from}}", to = "{{to}}", result_slot = "result", api_url = "https://open.er-api.com/v6/latest/{{from_code}}" }
+on_success = "speak_result"
+on_error = "speak_error"
+
+[[scenarios.steps]]
+id = "speak_result"
+action = { type = "say_text", text = "{{result_phrase}}.", speed = 1.0, cache = false }
+on_success = "done"
+on_error = "done"
+
+[[scenarios.steps]]
+id = "speak_error"
+action = { type = "say_text", text = "Не получилось узнать актуальный курс. Проверь подключение к интернету и попробуй ещё раз.", speed = 1.0, cache = true }
+on_success = "done"
+on_error = "done"
+
+[[scenarios.steps]]
+id = "done"
+action = { type = "emit_event", event = "currency_converter_done", payload = {} }

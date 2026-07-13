@@ -177,6 +177,9 @@ impl ScenarioRunner {
             }
 
             let outcome = self.execute_step(step, &mut context, reply_provider);
+            if let Ok(outcome) = &outcome {
+                context.slots.extend(outcome.slots.clone());
+            }
             let success = outcome
                 .as_ref()
                 .map(|outcome| outcome.executed)
@@ -284,6 +287,7 @@ impl ScenarioRunner {
                 Ok(ActionOutcome {
                     executed: true,
                     message: format!("stored reply in slot `{reply_slot}`"),
+                    slots: HashMap::new(),
                 })
             }
             Action::WaitForReply { reply_slot } => {
@@ -293,6 +297,7 @@ impl ScenarioRunner {
                 Ok(ActionOutcome {
                     executed: true,
                     message: format!("stored reply in slot `{reply_slot}`"),
+                    slots: HashMap::new(),
                 })
             }
             action => self.execute_or_dry_run_with_slots(action, &context.slots),
@@ -331,6 +336,7 @@ impl ScenarioRunner {
             return Ok(ActionOutcome {
                 executed: true,
                 message: format!("dry-run: {action:?}"),
+                slots: HashMap::new(),
             });
         }
         self.executor.execute(&action)
@@ -348,6 +354,37 @@ pub fn validate_action(action: &Action) -> Result<(), ActionError> {
         )),
         Action::SetVolume { level, delta } if level.is_none() && delta.is_none() => Err(
             ActionError::Invalid("set_volume requires `level` or `delta`".into()),
+        ),
+        Action::Calculate { expression, .. } if expression.trim().is_empty() => Err(
+            ActionError::Invalid("calculate requires non-empty expression".into()),
+        ),
+        Action::MediaControl { command, .. }
+            if !matches!(
+                command.as_str(),
+                "play_pause"
+                    | "pause"
+                    | "seek_forward"
+                    | "forward"
+                    | "seek_backward"
+                    | "backward"
+                    | "rewind"
+            ) =>
+        {
+            Err(ActionError::Invalid(
+                "media_control has an unknown command".into(),
+            ))
+        }
+        Action::Weather {
+            location,
+            fallback_location,
+            ..
+        } if location.trim().is_empty() && fallback_location.trim().is_empty() => Err(
+            ActionError::Invalid("weather requires location or fallback_location".into()),
+        ),
+        Action::ConvertCurrency {
+            amount, from, to, ..
+        } if amount.trim().is_empty() || from.trim().is_empty() || to.trim().is_empty() => Err(
+            ActionError::Invalid("convert_currency requires amount, from and to".into()),
         ),
         _ => Ok(()),
     }
@@ -461,7 +498,31 @@ fn app_exists(app: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::{PluginManifest, ScenarioSounds};
+    use crate::{
+        plugins::{PluginManifest, ScenarioSounds},
+        TextSpeaker,
+    };
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    struct RecordingSpeaker(Arc<Mutex<Vec<String>>>);
+
+    impl TextSpeaker for RecordingSpeaker {
+        fn speak(
+            &self,
+            text: &str,
+            _voice: Option<&str>,
+            _speed: f32,
+            _cache: bool,
+        ) -> Result<ActionOutcome, ActionError> {
+            self.0.lock().unwrap().push(text.into());
+            Ok(ActionOutcome {
+                executed: true,
+                message: "spoken".into(),
+                slots: HashMap::new(),
+            })
+        }
+    }
 
     fn registry() -> PluginRegistry {
         PluginRegistry::from_manifests(vec![PluginManifest {
@@ -561,6 +622,66 @@ mod tests {
         let final_step = run.steps.last().unwrap();
         assert_eq!(final_step.id, "scenario_success_sound");
         assert!(final_step.success);
+    }
+
+    #[test]
+    fn calculation_result_is_available_to_following_tts_step() {
+        let spoken = Arc::new(Mutex::new(Vec::new()));
+        let executor =
+            ActionExecutor::with_text_speaker(Arc::new(RecordingSpeaker(spoken.clone())));
+        let manifest = PluginManifest {
+            id: "calculator".into(),
+            name: "Calculator".into(),
+            enabled: true,
+            commands: vec![],
+            scenarios: vec![Scenario {
+                id: "calculate".into(),
+                aliases: vec![],
+                patterns: vec![],
+                priority: 0,
+                sounds: ScenarioSounds::default(),
+                steps: vec![
+                    ScenarioStep {
+                        id: "calculate".into(),
+                        when: None,
+                        action: Action::Calculate {
+                            expression: "два плюс три умножить на четыре".into(),
+                            result_slot: "result".into(),
+                        },
+                        on_success: None,
+                        on_error: None,
+                        before_sound: None,
+                        after_sound: None,
+                    },
+                    ScenarioStep {
+                        id: "speak".into(),
+                        when: None,
+                        action: Action::SayText {
+                            text: "{{result_phrase}}.".into(),
+                            voice: None,
+                            speed: 1.0,
+                            cache: false,
+                        },
+                        on_success: None,
+                        on_error: None,
+                        before_sound: None,
+                        after_sound: None,
+                    },
+                ],
+            }],
+        };
+        let runner = ScenarioRunner::new(PluginRegistry::from_manifests(vec![manifest]), executor);
+        let run = runner
+            .run(
+                "calculator",
+                "calculate",
+                HashMap::new(),
+                &mut NoopReplyProvider,
+            )
+            .unwrap();
+
+        assert_eq!(run.slots.get("result").map(String::as_str), Some("14"));
+        assert_eq!(spoken.lock().unwrap().as_slice(), ["четырнадцать."]);
     }
 
     #[test]

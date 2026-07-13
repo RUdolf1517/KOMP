@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod config;
+mod dynamic_actions;
 pub mod events;
 pub mod executor;
 pub mod intent;
@@ -10,7 +11,10 @@ pub mod plugins;
 pub mod scenario;
 pub mod stt;
 
-pub use config::{ErezConfig, Language, LmStudioConfig, ModelConfig, TtsConfig};
+pub use config::{
+    ErezConfig, Language, LmStudioConfig, ModelConfig, TtsConfig, WakeConfig, WeatherConfig,
+    XttsConfig,
+};
 pub use events::{AssistantEvent, EventKind};
 pub use executor::{apply_slots_to_action, ActionExecutor, ActionOutcome, TextSpeaker};
 pub use intent::{

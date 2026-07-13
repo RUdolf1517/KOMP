@@ -1,0 +1,35 @@
+id = "system_weather"
+name = "Погода"
+enabled = true
+commands = []
+
+[[scenarios]]
+id = "weather"
+aliases = ["погода", "какая погода", "скажи погоду", "что с погодой", "погода сейчас"]
+patterns = [
+  "^(?:какая |скажи )?погода (?:в|на) (?P<location>.+)$",
+  "^что с погодой (?:в|на) (?P<location>.+)$"
+]
+priority = 50
+
+[[scenarios.steps]]
+id = "load_weather"
+action = { type = "weather", location = "{{location}}", fallback_location = "{{weather_location}}", result_slot = "weather" }
+on_success = "speak_weather"
+on_error = "speak_error"
+
+[[scenarios.steps]]
+id = "speak_weather"
+action = { type = "say_text", text = "{{weather_phrase}}", speed = 1.0, cache = false }
+on_success = "done"
+on_error = "done"
+
+[[scenarios.steps]]
+id = "speak_error"
+action = { type = "say_text", text = "Не удалось получить погоду.", speed = 1.0, cache = true }
+on_success = "done"
+on_error = "done"
+
+[[scenarios.steps]]
+id = "done"
+action = { type = "emit_event", event = "weather_done", payload = {} }

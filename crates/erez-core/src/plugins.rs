@@ -67,6 +67,11 @@ pub enum Action {
         #[serde(default)]
         delta: Option<i32>,
     },
+    MediaControl {
+        command: String,
+        #[serde(default)]
+        seconds: Option<i32>,
+    },
     PlaySound {
         file: String,
     },
@@ -109,7 +114,37 @@ pub enum Action {
         method: String,
         url: String,
         #[serde(default)]
+        headers: HashMap<String, String>,
+        #[serde(default)]
         body: Option<Value>,
+        #[serde(default)]
+        response_slot: Option<String>,
+        #[serde(default)]
+        json_path: Option<String>,
+        #[serde(default = "default_http_timeout_ms")]
+        timeout_ms: u64,
+    },
+    ConvertCurrency {
+        amount: String,
+        from: String,
+        to: String,
+        #[serde(default = "default_result_slot")]
+        result_slot: String,
+        #[serde(default = "default_currency_api_url")]
+        api_url: String,
+    },
+    Calculate {
+        expression: String,
+        #[serde(default = "default_result_slot")]
+        result_slot: String,
+    },
+    Weather {
+        #[serde(default)]
+        location: String,
+        #[serde(default)]
+        fallback_location: String,
+        #[serde(default = "default_weather_result_slot")]
+        result_slot: String,
     },
     EmitEvent {
         event: String,
@@ -124,6 +159,22 @@ fn default_tts_speed() -> f32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_http_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_result_slot() -> String {
+    "result".into()
+}
+
+fn default_weather_result_slot() -> String {
+    "weather".into()
+}
+
+fn default_currency_api_url() -> String {
+    "https://open.er-api.com/v6/latest/{{from_code}}".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -504,6 +555,50 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(found.slots.get("query"), Some(&"погоду москва".to_string()));
+    }
+
+    #[test]
+    fn bundled_user_voice_tools_extract_arguments() {
+        let currency: PluginManifest = toml::from_str(include_str!(
+            "../../../plugins.user/scenarios/currency_converter/scenario.toml"
+        ))
+        .unwrap();
+        let calculator: PluginManifest = toml::from_str(include_str!(
+            "../../../plugins.user/scenarios/calculator/scenario.toml"
+        ))
+        .unwrap();
+        let registry = PluginRegistry::from_manifests(vec![currency, calculator]);
+
+        let conversion = registry
+            .find_match("сколько 100 евро в рублях")
+            .unwrap()
+            .unwrap();
+        assert_eq!(conversion.command_id, "currency_converter");
+        assert_eq!(
+            conversion.slots.get("amount").map(String::as_str),
+            Some("100")
+        );
+        assert_eq!(
+            conversion.slots.get("from").map(String::as_str),
+            Some("евро")
+        );
+        assert_eq!(
+            conversion.slots.get("to").map(String::as_str),
+            Some("рублях")
+        );
+
+        let calculation = registry
+            .find_match("посчитай двенадцать умножить на пять")
+            .unwrap()
+            .unwrap();
+        assert_eq!(calculation.command_id, "calculator");
+        assert_eq!(
+            calculation.slots.get("expression").map(String::as_str),
+            Some("двенадцать умножить на пять")
+        );
+
+        let short_calculation = registry.find_match("два плюс два").unwrap().unwrap();
+        assert_eq!(short_calculation.command_id, "calculator");
     }
 
     #[test]

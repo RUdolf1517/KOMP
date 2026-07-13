@@ -2,7 +2,9 @@ use crate::plugins::Action;
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use std::path::Path;
-use std::{collections::HashMap, fmt, fs::File, io::BufReader, process::Command, sync::Arc};
+use std::{
+    collections::HashMap, fmt, fs::File, io::BufReader, process::Command, sync::Arc, time::Duration,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -23,6 +25,26 @@ pub enum ActionError {
 pub struct ActionOutcome {
     pub executed: bool,
     pub message: String,
+    #[serde(default)]
+    pub slots: HashMap<String, String>,
+}
+
+impl ActionOutcome {
+    fn success(message: impl Into<String>) -> Self {
+        Self {
+            executed: true,
+            message: message.into(),
+            slots: HashMap::new(),
+        }
+    }
+
+    fn with_slots(message: impl Into<String>, slots: HashMap<String, String>) -> Self {
+        Self {
+            executed: true,
+            message: message.into(),
+            slots,
+        }
+    }
 }
 
 pub trait TextSpeaker: Send + Sync {
@@ -58,16 +80,17 @@ impl ActionExecutor {
 
     pub fn execute(&self, action: &Action) -> Result<ActionOutcome, ActionError> {
         match action {
-            Action::EmitEvent { event, .. } => Ok(ActionOutcome {
-                executed: true,
-                message: format!("emitted event `{event}`"),
-            }),
+            Action::EmitEvent { event, .. } => {
+                Ok(ActionOutcome::success(format!("emitted event `{event}`")))
+            }
             Action::Scenario { scenario_id, .. } => Ok(ActionOutcome {
                 executed: false,
                 message: format!("scenario `{scenario_id}` must be executed by ScenarioRunner"),
+                slots: HashMap::new(),
             }),
             Action::OpenApp { app } => run_open_app(app),
             Action::SetVolume { level, delta } => run_set_volume(*level, *delta),
+            Action::MediaControl { command, seconds } => run_media_control(command, *seconds),
             Action::PlaySound { file } | Action::SaySound { file } => run_play_sound(file),
             Action::SayText {
                 text,
@@ -82,6 +105,7 @@ impl ActionExecutor {
             Action::Ask { .. } | Action::WaitForReply { .. } => Ok(ActionOutcome {
                 executed: false,
                 message: "dialog actions must be executed by ScenarioRunner".into(),
+                slots: HashMap::new(),
             }),
             Action::Shell {
                 command,
@@ -95,11 +119,44 @@ impl ActionExecutor {
                 Ok(ActionOutcome {
                     executed: status.success(),
                     message: format!("shell exited with {status}"),
+                    slots: HashMap::new(),
                 })
             }
             Action::Hotkey { keys } => run_hotkey(keys),
             Action::Url { url } => run_url(url),
-            Action::HttpRequest { method, url, body } => run_http_request(method, url, body),
+            Action::HttpRequest {
+                method,
+                url,
+                headers,
+                body,
+                response_slot,
+                json_path,
+                timeout_ms,
+            } => run_http_request(
+                method,
+                url,
+                headers,
+                body,
+                response_slot.as_deref(),
+                json_path.as_deref(),
+                *timeout_ms,
+            ),
+            Action::ConvertCurrency {
+                amount,
+                from,
+                to,
+                result_slot,
+                api_url,
+            } => run_currency_conversion(amount, from, to, result_slot, api_url),
+            Action::Calculate {
+                expression,
+                result_slot,
+            } => run_calculation(expression, result_slot),
+            Action::Weather {
+                location,
+                fallback_location,
+                result_slot,
+            } => run_weather(location, fallback_location, result_slot),
         }
     }
 }
@@ -149,14 +206,65 @@ pub fn apply_slots_to_action(action: &Action, slots: &HashMap<String, String>) -
         Action::Url { url } => Action::Url {
             url: interpolate_slots(url, slots, true),
         },
-        Action::HttpRequest { method, url, body } => Action::HttpRequest {
+        Action::HttpRequest {
+            method,
+            url,
+            headers,
+            body,
+            response_slot,
+            json_path,
+            timeout_ms,
+        } => Action::HttpRequest {
             method: interpolate_slots(method, slots, false),
             url: interpolate_slots(url, slots, true),
-            body: body.clone(),
+            headers: headers
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        interpolate_slots(key, slots, false),
+                        interpolate_slots(value, slots, false),
+                    )
+                })
+                .collect(),
+            body: body.as_ref().map(|value| interpolate_json(value, slots)),
+            response_slot: response_slot.clone(),
+            json_path: json_path
+                .as_ref()
+                .map(|path| interpolate_slots(path, slots, false)),
+            timeout_ms: *timeout_ms,
+        },
+        Action::ConvertCurrency {
+            amount,
+            from,
+            to,
+            result_slot,
+            api_url,
+        } => Action::ConvertCurrency {
+            amount: interpolate_slots(amount, slots, false),
+            from: interpolate_slots(from, slots, false),
+            to: interpolate_slots(to, slots, false),
+            result_slot: result_slot.clone(),
+            api_url: interpolate_slots(api_url, slots, false),
+        },
+        Action::Calculate {
+            expression,
+            result_slot,
+        } => Action::Calculate {
+            expression: interpolate_slots(expression, slots, false),
+            result_slot: result_slot.clone(),
+        },
+        Action::Weather {
+            location,
+            fallback_location,
+            result_slot,
+        } => Action::Weather {
+            location: interpolate_slots(location, slots, false),
+            fallback_location: interpolate_slots(fallback_location, slots, false),
+            result_slot: result_slot.clone(),
         },
         Action::EmitEvent { event, payload } => Action::EmitEvent {
             event: interpolate_slots(event, slots, false),
-            payload: payload.clone(),
+            payload: interpolate_json(payload, slots),
         },
         Action::Scenario {
             plugin_id,
@@ -168,6 +276,10 @@ pub fn apply_slots_to_action(action: &Action, slots: &HashMap<String, String>) -
         Action::SetVolume { level, delta } => Action::SetVolume {
             level: *level,
             delta: *delta,
+        },
+        Action::MediaControl { command, seconds } => Action::MediaControl {
+            command: interpolate_slots(command, slots, false),
+            seconds: *seconds,
         },
         Action::Ask {
             sound,
@@ -201,6 +313,30 @@ fn interpolate_slots(input: &str, slots: &HashMap<String, String>, encode: bool)
     output
 }
 
+fn interpolate_json(
+    value: &serde_json::Value,
+    slots: &HashMap<String, String>,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(value) => {
+            serde_json::Value::String(interpolate_slots(value, slots, false))
+        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .iter()
+                .map(|value| interpolate_json(value, slots))
+                .collect(),
+        ),
+        serde_json::Value::Object(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), interpolate_json(value, slots)))
+                .collect(),
+        ),
+        value => value.clone(),
+    }
+}
+
 fn percent_encode(input: &str) -> String {
     let mut encoded = String::new();
     for byte in input.as_bytes() {
@@ -230,6 +366,7 @@ fn run_play_sound(file: &str) -> Result<ActionOutcome, ActionError> {
     Ok(ActionOutcome {
         executed: true,
         message: format!("played sound `{file}`"),
+        slots: HashMap::new(),
     })
 }
 
@@ -255,6 +392,7 @@ fn run_set_volume(level: Option<i32>, delta: Option<i32>) -> Result<ActionOutcom
         return Ok(ActionOutcome {
             executed: status.success(),
             message: format!("set_volume exited with {status}"),
+            slots: HashMap::new(),
         });
     }
 
@@ -284,6 +422,7 @@ fn run_set_volume(level: Option<i32>, delta: Option<i32>) -> Result<ActionOutcom
         return Ok(ActionOutcome {
             executed: status.success(),
             message: format!("set_volume exited with {status}"),
+            slots: HashMap::new(),
         });
     }
 
@@ -293,6 +432,7 @@ fn run_set_volume(level: Option<i32>, delta: Option<i32>) -> Result<ActionOutcom
         return Ok(ActionOutcome {
             executed: status.success(),
             message: format!("set_volume exited with {status}"),
+            slots: HashMap::new(),
         });
     }
 }
@@ -306,12 +446,14 @@ fn run_open_app(app: &str) -> Result<ActionOutcome, ActionError> {
         return Ok(ActionOutcome {
             executed: status.success(),
             message: format!("open default browser exited with {status}"),
+            slots: HashMap::new(),
         });
     }
     let status = platform_open_app(app)?.status()?;
     Ok(ActionOutcome {
         executed: status.success(),
         message: format!("open_app exited with {status}"),
+        slots: HashMap::new(),
     })
 }
 
@@ -325,25 +467,161 @@ fn run_url(url: &str) -> Result<ActionOutcome, ActionError> {
     Ok(ActionOutcome {
         executed: status.success(),
         message: format!("url opener exited with {status}"),
+        slots: HashMap::new(),
     })
 }
 
 fn run_http_request(
     method: &str,
     url: &str,
+    headers: &HashMap<String, String>,
     body: &Option<serde_json::Value>,
+    response_slot: Option<&str>,
+    json_path: Option<&str>,
+    timeout_ms: u64,
 ) -> Result<ActionOutcome, ActionError> {
     let method = reqwest::Method::from_bytes(method.as_bytes())
         .map_err(|err| ActionError::Invalid(format!("invalid http method: {err}")))?;
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(timeout_ms.clamp(100, 120_000)))
+        .build()?;
     let mut request = client.request(method, url);
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
     if let Some(body) = body {
         request = request.json(body);
     }
     let response = request.send()?;
+    let status = response.status();
+    let response_text = response.text()?;
+    if !status.is_success() {
+        return Ok(ActionOutcome {
+            executed: false,
+            message: format!(
+                "http_request returned {status}: {}",
+                truncate(&response_text, 240)
+            ),
+            slots: HashMap::new(),
+        });
+    }
+
+    let mut slots = HashMap::new();
+    if let Some(slot) = response_slot.filter(|slot| !slot.trim().is_empty()) {
+        let value = if let Some(path) = json_path.filter(|path| !path.trim().is_empty()) {
+            let json: serde_json::Value = serde_json::from_str(&response_text).map_err(|err| {
+                ActionError::Invalid(format!("http response is not valid JSON: {err}"))
+            })?;
+            json_path_value(&json, path).ok_or_else(|| {
+                ActionError::Invalid(format!("JSON path `{path}` was not found in response"))
+            })?
+        } else {
+            response_text.clone()
+        };
+        slots.insert(slot.to_string(), value);
+    }
+    Ok(ActionOutcome::with_slots(
+        format!("http_request returned {status}"),
+        slots,
+    ))
+}
+
+fn run_currency_conversion(
+    amount: &str,
+    from: &str,
+    to: &str,
+    result_slot: &str,
+    api_url: &str,
+) -> Result<ActionOutcome, ActionError> {
+    let slots = crate::dynamic_actions::convert_currency(amount, from, to, result_slot, api_url)
+        .map_err(ActionError::Invalid)?;
+    Ok(ActionOutcome::with_slots(
+        format!("converted {from} to {to}"),
+        slots,
+    ))
+}
+
+fn run_calculation(expression: &str, result_slot: &str) -> Result<ActionOutcome, ActionError> {
+    let slots =
+        crate::dynamic_actions::calculate(expression, result_slot).map_err(ActionError::Invalid)?;
+    Ok(ActionOutcome::with_slots("calculation completed", slots))
+}
+
+fn run_weather(
+    location: &str,
+    fallback_location: &str,
+    result_slot: &str,
+) -> Result<ActionOutcome, ActionError> {
+    let slots = crate::dynamic_actions::weather(location, fallback_location, result_slot)
+        .map_err(ActionError::Invalid)?;
+    Ok(ActionOutcome::with_slots("weather loaded", slots))
+}
+
+fn run_media_control(command: &str, seconds: Option<i32>) -> Result<ActionOutcome, ActionError> {
+    let normalized = command.trim().to_lowercase();
+    if normalized == "play_pause" || normalized == "pause" {
+        #[cfg(target_os = "macos")]
+        let status = macos_hotkey(&["space".into()])?.status()?;
+        #[cfg(target_os = "windows")]
+        let status = windows_hotkey(&["space".into()])?.status()?;
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let status = Command::new("playerctl").arg("play-pause").status()?;
+        return Ok(ActionOutcome {
+            executed: status.success(),
+            message: format!("media play/pause exited with {status}"),
+            slots: HashMap::new(),
+        });
+    }
+
+    let direction = match normalized.as_str() {
+        "seek_forward" | "forward" => 1,
+        "seek_backward" | "backward" | "rewind" => -1,
+        _ => {
+            return Err(ActionError::Invalid(format!(
+                "unknown media command `{command}`"
+            )))
+        }
+    };
+    let seconds = seconds.unwrap_or(30).unsigned_abs().clamp(1, 3600);
+
+    #[cfg(target_os = "macos")]
+    let status = {
+        let key_code = if direction > 0 { 124 } else { 123 };
+        let repeats = seconds.div_ceil(5);
+        Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                "tell application \"System Events\" to repeat {repeats} times\nkey code {key_code}\ndelay 0.03\nend repeat"
+            ))
+            .status()?
+    };
+    #[cfg(target_os = "windows")]
+    let status = {
+        let key = if direction > 0 { "{RIGHT}" } else { "{LEFT}" };
+        let repeats = seconds.div_ceil(5);
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; 1..{repeats} | ForEach-Object {{ [System.Windows.Forms.SendKeys]::SendWait('{key}'); Start-Sleep -Milliseconds 30 }}"
+        );
+        Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .status()?
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let status = {
+        let offset = if direction > 0 {
+            format!("{seconds}+")
+        } else {
+            format!("{seconds}-")
+        };
+        Command::new("playerctl")
+            .args(["position", &offset])
+            .status()?
+    };
+
     Ok(ActionOutcome {
-        executed: response.status().is_success(),
-        message: format!("http_request returned {}", response.status()),
+        executed: status.success(),
+        message: format!("media seek {direction} {seconds}s exited with {status}"),
+        slots: HashMap::new(),
     })
 }
 
@@ -361,7 +639,33 @@ fn run_hotkey(keys: &[String]) -> Result<ActionOutcome, ActionError> {
     Ok(ActionOutcome {
         executed: status.success(),
         message: format!("hotkey exited with {status}"),
+        slots: HashMap::new(),
     })
+}
+
+fn json_path_value(value: &serde_json::Value, path: &str) -> Option<String> {
+    let mut current = value;
+    for part in path.trim_start_matches("$.").split('.') {
+        if part.is_empty() {
+            continue;
+        }
+        current = match current {
+            serde_json::Value::Object(map) => map.get(part)?,
+            serde_json::Value::Array(items) => items.get(part.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(match current {
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Null => "null".into(),
+        value => value.to_string(),
+    })
+}
+
+fn truncate(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 fn platform_open_app(app: &str) -> Result<Command, ActionError> {
@@ -698,6 +1002,7 @@ mod tests {
             Ok(ActionOutcome {
                 executed: true,
                 message: "spoken".into(),
+                slots: HashMap::new(),
             })
         }
     }
@@ -724,6 +1029,16 @@ mod tests {
             ActionExecutor::default().execute(&action),
             Err(ActionError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn extracts_nested_json_values_for_http_response_slots() {
+        let response = serde_json::json!({"data": {"items": [{"value": 42}]}});
+        assert_eq!(
+            json_path_value(&response, "data.items.0.value").as_deref(),
+            Some("42")
+        );
+        assert!(json_path_value(&response, "data.missing").is_none());
     }
 
     #[test]

@@ -232,7 +232,7 @@ impl WakePhraseDetector {
 #[cfg(feature = "vosk-stt")]
 pub mod vosk_backend {
     use super::{Language, SpeechRecognizer, SttError, Transcript};
-    use crate::config::ErezConfig;
+    use crate::{config::ErezConfig, normalize::normalize_phrase};
     use std::path::Path;
     use vosk::{CompleteResult, Model, Recognizer};
 
@@ -245,6 +245,8 @@ pub mod vosk_backend {
     pub struct VoskWakeRecognizer {
         recognizer: Recognizer,
         grammar: Vec<String>,
+        min_confidence: f32,
+        require_final: bool,
     }
 
     impl VoskSpeechRecognizer {
@@ -260,14 +262,28 @@ pub mod vosk_backend {
             let model = self
                 .model(Language::Ru)
                 .ok_or(SttError::ModelNotConfigured(Language::Ru))?;
-            Recognizer::new_with_grammar(model, self.sample_rate_hz, grammar)
-                .ok_or(SttError::RecognizerCreateFailed(Language::Ru))
+            let mut recognition_grammar = grammar.to_vec();
+            if !recognition_grammar.iter().any(|phrase| phrase == "[unk]") {
+                recognition_grammar.push("[unk]".into());
+            }
+            let mut recognizer =
+                Recognizer::new_with_grammar(model, self.sample_rate_hz, &recognition_grammar)
+                    .ok_or(SttError::RecognizerCreateFailed(Language::Ru))?;
+            recognizer.set_words(true);
+            Ok(recognizer)
         }
 
-        pub fn wake_detector(&self, grammar: &[String]) -> Result<VoskWakeRecognizer, SttError> {
+        pub fn wake_detector(
+            &self,
+            grammar: &[String],
+            min_confidence: f32,
+            require_final: bool,
+        ) -> Result<VoskWakeRecognizer, SttError> {
             Ok(VoskWakeRecognizer {
                 recognizer: self.wake_recognizer(grammar)?,
                 grammar: grammar.to_vec(),
+                min_confidence: min_confidence.clamp(0.0, 1.0),
+                require_final,
             })
         }
 
@@ -290,16 +306,23 @@ pub mod vosk_backend {
                 .accept_waveform(pcm_i16)
                 .map_err(|err| SttError::AcceptWaveform(err.to_string()))?;
             let partial = self.recognizer.partial_result().partial.to_string();
-            if crate::normalize::matches_wake_phrase(&partial, &self.grammar) {
+            if !self.require_final && crate::normalize::matches_wake_phrase(&partial, &self.grammar)
+            {
                 self.recognizer.reset();
                 return Ok(Some(partial));
             }
 
             if matches!(state, vosk::DecodingState::Finalized) {
-                let finalized = complete_result_text(self.recognizer.result());
-                if crate::normalize::matches_wake_phrase(&finalized, &self.grammar) {
+                let transcript =
+                    complete_result_to_transcript(self.recognizer.result(), Language::Ru)?;
+                if wake_candidate_is_confident(
+                    &transcript.text,
+                    transcript.confidence,
+                    &self.grammar,
+                    self.min_confidence,
+                ) {
                     self.recognizer.reset();
-                    return Ok(Some(finalized));
+                    return Ok(Some(transcript.text));
                 }
             }
 
@@ -374,15 +397,19 @@ pub mod vosk_backend {
         }
     }
 
-    fn complete_result_text(result: CompleteResult<'_>) -> String {
-        match result {
-            CompleteResult::Single(single) => single.text.to_string(),
-            CompleteResult::Multiple(multiple) => multiple
-                .alternatives
-                .first()
-                .map(|alternative| alternative.text.to_string())
-                .unwrap_or_default(),
-        }
+    fn wake_candidate_is_confident(
+        text: &str,
+        confidence: f32,
+        grammar: &[String],
+        min_confidence: f32,
+    ) -> bool {
+        let normalized = normalize_phrase(text);
+        confidence >= min_confidence
+            && !normalized.is_empty()
+            && grammar
+                .iter()
+                .map(|phrase| normalize_phrase(phrase))
+                .any(|phrase| normalized == phrase)
     }
 }
 

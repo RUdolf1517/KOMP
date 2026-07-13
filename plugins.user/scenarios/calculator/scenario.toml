@@ -1,0 +1,35 @@
+id = "user_calculator"
+name = "Калькулятор"
+enabled = true
+commands = []
+
+[[scenarios]]
+id = "calculator"
+aliases = []
+patterns = [
+    "^(?:сколько будет|посчитай|вычисли|калькулятор) (?P<expression>.+)$",
+    "^(?:сколько )?(?P<expression>.+ (?:плюс|минус|умножить на|разделить на|в степени) .+)$",
+]
+priority = 45
+
+[[scenarios.steps]]
+id = "calculate"
+action = { type = "calculate", expression = "{{expression}}", result_slot = "result" }
+on_success = "speak_result"
+on_error = "speak_error"
+
+[[scenarios.steps]]
+id = "speak_result"
+action = { type = "say_text", text = "{{result_phrase}}.", speed = 1.0, cache = false }
+on_success = "done"
+on_error = "done"
+
+[[scenarios.steps]]
+id = "speak_error"
+action = { type = "say_text", text = "Я не смог разобрать выражение. Попробуй сказать, например: посчитай двенадцать умножить на пять.", speed = 1.0, cache = true }
+on_success = "done"
+on_error = "done"
+
+[[scenarios.steps]]
+id = "done"
+action = { type = "emit_event", event = "calculator_done", payload = {} }

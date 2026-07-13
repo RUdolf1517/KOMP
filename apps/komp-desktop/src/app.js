@@ -1,11 +1,15 @@
 const API = "http://127.0.0.1:3737";
-const actionTypes = ["open_app","set_volume","say_text","play_sound","say_sound","ask","wait_for_reply","url","hotkey","emit_event","http_request","shell"];
+const actionTypes = ["open_app","set_volume","media_control","weather","say_text","convert_currency","calculate","play_sound","say_sound","ask","wait_for_reply","url","hotkey","emit_event","http_request","shell"];
 const actionLabels = {
   open_app: "Открыть приложение",
   set_volume: "Изменить громкость",
+  media_control: "Управлять плеером",
+  weather: "Узнать погоду",
   play_sound: "Проиграть звук",
   say_sound: "Озвучка",
   say_text: "Сказать текст",
+  convert_currency: "Конвертировать валюту",
+  calculate: "Вычислить",
   ask: "Задать вопрос",
   wait_for_reply: "Ждать ответ",
   url: "Открыть сайт",
@@ -14,7 +18,7 @@ const actionLabels = {
   http_request: "HTTP-запрос",
   shell: "Команда shell"
 };
-const quickStepTypes = ["open_app", "say_text", "set_volume", "play_sound", "ask", "url"];
+const quickStepTypes = ["open_app", "say_text", "weather", "media_control", "convert_currency", "calculate", "set_volume", "play_sound", "ask", "url"];
 const coreSystemSoundSlots = [
   ["startup", "Запуск KOMP"],
   ["shutdown", "Выход из KOMP"],
@@ -45,7 +49,7 @@ const batteryStatusSoundSlots = [
   ["battery_unavailable", "Не удалось узнать заряд"],
   ...batterySoundSlots
 ];
-const state = { view: "scenarios", scenarios: [], selected: null, document: null, apps: [], status: "", errors: [], run: null, systemSounds: {}, systemSoundRoot: "", config: null, lmStudioStatus: null, ttsStatus: null, voices: [], voiceDraft: { id: "komp", prompt_text: "", file: null }, ttsTestText: "Привет. Я КОМП, ваш голосовой помощник." };
+const state = { view: "scenarios", scenarios: [], selected: null, document: null, apps: [], status: "", errors: [], run: null, systemSounds: {}, systemSoundRoot: "", config: null, lmStudioStatus: null, ttsStatus: null, ttsProviders: [], ttsProviderStatuses: {}, ttsBenchmark: null, ttsConfigSaveRevision: 0, ttsConfigSaveQueue: Promise.resolve(), ttsConfigSaveState: "saved", voices: [], voiceDraft: { id: "komp", prompt_text: "", file: null }, ttsTestText: "Привет. Я КОМП, ваш голосовой помощник." };
 
 const $ = (sel) => document.querySelector(sel);
 const el = (tag, attrs = {}, children = []) => {
@@ -144,9 +148,12 @@ async function loadSystemSounds() {
 
 async function loadTts() {
   try {
-    const [status, voices] = await Promise.all([api("/tts/status", { noRetry: true }), api("/tts/voices", { noRetry: true })]);
+    const [status, voices, providers] = await Promise.all([api("/tts/status", { noRetry: true }), api("/tts/voices", { noRetry: true }), api("/tts/providers", { noRetry: true })]);
     state.ttsStatus = status;
     state.voices = voices.voices || [];
+    state.ttsProviders = providers.providers || [];
+    const statuses = await Promise.all(state.ttsProviders.map(item => api(`/tts/providers/${item.id}/status`, { noRetry: true }).catch(() => null)));
+    state.ttsProviderStatuses = Object.fromEntries(statuses.filter(Boolean).map(item => [item.provider, item]));
     render();
   } catch (_) {}
 }
@@ -210,6 +217,7 @@ function render() {
   if (state.view === "sounds") renderSoundSettings();
   else if (state.view === "lmstudio") renderLmStudioSettings();
   else if (state.view === "voice") renderVoiceSettings();
+  else if (state.view === "settings") renderGeneralSettings();
   else renderEditor();
 }
 
@@ -233,6 +241,10 @@ function renderSidebar() {
     el("button", { class: `scenario-item ${state.view === "voice" ? "active" : ""}`, onClick: openVoiceSettings }, [
       el("div", { class: "scenario-title" }, ["Голос"]),
       el("div", { class: "scenario-meta" }, [state.ttsStatus?.voice_ready ? `профиль ${state.ttsStatus.voice_id}` : "нужно настроить"])
+    ]),
+    el("button", { class: `scenario-item ${state.view === "settings" ? "active" : ""}`, onClick: openGeneralSettings }, [
+      el("div", { class: "scenario-title" }, ["Настройки"]),
+      el("div", { class: "scenario-meta" }, ["погода, чувствительность wake-фразы"])
     ]),
     ...state.scenarios.filter(s => s.id.toLowerCase().includes(q) || s.aliases.join(" ").toLowerCase().includes(q)).map(s =>
     el("button", { class: `scenario-item ${s.id === state.selected ? "active" : ""}`, onClick: () => selectScenario(s.id) }, [
@@ -262,6 +274,10 @@ function renderTopActions() {
       el("button", { class: "btn", onClick: startTts }, ["Запустить"]),
       el("button", { class: "btn", onClick: stopTts }, ["Остановить"])
     );
+    return;
+  }
+  if (state.view === "settings") {
+    box.replaceChildren(el("button", { class: "btn primary", onClick: saveGeneralSettings }, ["Сохранить"]));
     return;
   }
   box.replaceChildren(
@@ -379,18 +395,30 @@ function renderVoiceSettings() {
   if (!root) return;
   const config = ensureConfig();
   const tts = config.tts;
-  const status = state.ttsStatus || {};
+  const provider = tts.provider === "xtts" ? "xtts" : "cosyvoice";
+  const status = state.ttsProviderStatuses[provider] || state.ttsStatus || {};
+  const providerName = provider === "xtts" ? "XTTS v2" : "CosyVoice";
+  const benchmark = state.ttsBenchmark;
   root.replaceChildren(el("div", { class: "grid" }, [
     el("div", {}, [
-      panel("CosyVoice", [
+      panel("Движок речи", [
         help("Динамические фразы генерируются локально клонированным голосом. Интернет нужен только один раз для установки модели."),
+        el("div", { class: `save-state ${state.ttsConfigSaveState}` }, [state.ttsConfigSaveState === "saving" ? "Сохраняю настройки..." : state.ttsConfigSaveState === "error" ? "Настройки не сохранены" : "Настройки сохранены"]),
+        el("div", { class: "segmented" }, [
+          el("button", { class: provider === "xtts" ? "active" : "", onClick: () => selectTtsProvider("xtts") }, ["XTTS v2"]),
+          el("button", { class: provider === "cosyvoice" ? "active" : "", onClick: () => selectTtsProvider("cosyvoice") }, ["CosyVoice"])
+        ]),
         el("div", { class: "status-strip" }, [
-          status.installed ? "Установлен" : "Не установлен",
+          `${providerName} · `,
+          status.installed ? "установлен" : "не установлен",
           status.running ? " · запущен" : " · остановлен",
           status.device ? ` · ${status.device.toUpperCase()}` : ""
         ]),
+        provider === "xtts" ? field("Я принимаю CPML только для некоммерческого использования", checkbox(!!tts.xtts.license_accepted, v => { tts.xtts.license_accepted = v; saveTtsConfig(); })) : null,
         el("div", { class: "row" }, [
-          el("button", { class: "btn primary", onClick: installTts }, [status.installed ? "Переустановить" : "Установить CosyVoice"]),
+          el("button", { class: "btn primary", disabled: provider === "xtts" && !tts.xtts.license_accepted, onClick: installTts }, [status.installed ? "Переустановить" : `Установить ${providerName}`]),
+          el("button", { class: "btn", disabled: !status.installed || status.running, onClick: startTts }, ["Запустить"]),
+          el("button", { class: "btn", disabled: !status.running, onClick: stopTts }, ["Остановить"]),
           field("Включить динамическую речь", checkbox(!!tts.enabled, v => { tts.enabled = v; saveTtsConfig(); }))
         ]),
         field("Воспроизведение", select(
@@ -404,7 +432,7 @@ function renderVoiceSettings() {
         help(tts.playback_mode === "streaming"
           ? "Речь начинается раньше, но на CPU между частями могут быть длинные паузы."
           : "KOMP сначала создаёт всю фразу, затем проигрывает её целиком без разрывов."),
-        help("На CPU всё работает офлайн, но первая генерация может занять заметно больше времени.")
+        help(provider === "xtts" ? "XTTS быстрее на слабом ПК и клонирует голос без расшифровки семпла. На CPU скорость зависит от конкретного процессора." : "CosyVoice обычно качественнее, но заметно тяжелее на CPU.")
       ]),
       panel("Клонированный голос", [
         help("Загрузите чистую запись длиной 3–15 секунд и точно напишите всё, что на ней произнесено."),
@@ -415,12 +443,19 @@ function renderVoiceSettings() {
             el("input", { type: "file", accept: ".mp3,.wav,.ogg,audio/mpeg,audio/wav,audio/ogg", onChange: e => { state.voiceDraft.file = e.target.files?.[0] || null; render(); } })
           ]))
         ]),
-        field("Точная расшифровка записи", el("textarea", { value: state.voiceDraft.prompt_text, placeholder: "Напишите дословно всё, что произнесено в аудио", onInput: e => state.voiceDraft.prompt_text = e.target.value })),
+        field(provider === "xtts" ? "Расшифровка записи (необязательно)" : "Точная расшифровка записи", el("textarea", { value: state.voiceDraft.prompt_text, placeholder: provider === "xtts" ? "Для XTTS можно оставить пустым" : "Напишите дословно всё, что произнесено в аудио", onInput: e => state.voiceDraft.prompt_text = e.target.value })),
         el("button", { class: "btn primary", onClick: uploadVoice }, ["Сохранить голос"])
       ]),
       panel("Проверка голоса", [
         field("Тестовая фраза", el("textarea", { value: state.ttsTestText, onInput: e => state.ttsTestText = e.target.value })),
-        el("button", { class: "btn primary", disabled: !status.voice_ready, onClick: () => testTtsText(state.ttsTestText) }, ["Прослушать"])
+        el("div", { class: "row" }, [
+          el("button", { class: "btn primary", disabled: !status.voice_ready, onClick: () => testTtsText(state.ttsTestText) }, ["Прослушать"]),
+          el("button", { class: "btn", disabled: !status.voice_ready, onClick: benchmarkTts }, ["Проверить скорость"])
+        ]),
+        benchmark ? el("div", { class: `benchmark ${benchmark.rtf > 2 || benchmark.first_chunk_ms > 3000 ? "warning" : "ok"}` }, [
+          `Первый звук: ${(benchmark.first_chunk_ms / 1000).toFixed(1)} с · RTF: ${benchmark.rtf.toFixed(2)} · всего ${(benchmark.total_ms / 1000).toFixed(1)} с`,
+          benchmark.rtf > 2 || benchmark.first_chunk_ms > 3000 ? " · На этом компьютере движок медленнее целевого уровня" : " · Скорость в целевом диапазоне"
+        ]) : null
       ])
     ]),
     el("div", {}, [
@@ -431,8 +466,42 @@ function renderVoiceSettings() {
         ]))) : help("Голосовых профилей пока нет.")
       ]),
       panel("Пути", [
-        help(`Модель: ${tts.model_path || "vendor/cosyvoice/models/Fun-CosyVoice3-0.5B"}`),
+        help(`Модель: ${provider === "xtts" ? tts.xtts.model : (tts.model_path || "vendor/cosyvoice/models/Fun-CosyVoice3-0.5B")}`),
         help("Голосовые профили сохраняются в папке voices и не попадают в git.")
+      ])
+    ])
+  ]));
+}
+
+function renderGeneralSettings() {
+  const root = $("#editor");
+  if (!root) return;
+  const config = ensureConfig();
+  const wake = config.wake;
+  const sensitivity = wake.min_confidence >= 0.89 ? "strict" : wake.min_confidence <= 0.76 ? "sensitive" : "balanced";
+  root.replaceChildren(el("div", { class: "grid" }, [
+    el("div", {}, [
+      panel("Погода", [
+        help("Эта локация используется для команды «какая погода», если в самой фразе не назван другой город или район."),
+        field("Базовый район или город", input(config.weather.base_location || "", v => config.weather.base_location = v, false, "text", "Хамовники, Москва"))
+      ]),
+      panel("Wake-фраза", [
+        help("Более строгий режим реже включается от обычного разговора. Изменение применяется после перезапуска прослушивания KOMP."),
+        field("Чувствительность", select(["strict", "balanced", "sensitive"], sensitivity, v => {
+          wake.min_confidence = { strict: 0.9, balanced: 0.84, sensitive: 0.74 }[v];
+          wake.require_final = true;
+        }, false, true, { strict: "Строгая", balanced: "Сбалансированная", sensitive: "Высокая" })),
+        details("Точная настройка", [
+          field("Минимальная уверенность 0–1", input(wake.min_confidence, v => wake.min_confidence = Math.max(0, Math.min(1, Number(v || 0.84))), false, "number", "0.84")),
+          field("Ждать завершения фразы", checkbox(wake.require_final !== false, v => wake.require_final = v)),
+          help("Отключение ожидания ускоряет отклик, но значительно повышает число ложных активаций.")
+        ])
+      ])
+    ]),
+    el("div", {}, [
+      panel("Текущие wake-фразы", [
+        ...(config.wake_phrases || [config.wake_phrase]).map(value => el("span", { class: "chip" }, [value])),
+        help("Wake-фразы задаются конфигурацией daemon; этот экран управляет точностью их обнаружения.")
       ])
     ])
   ]));
@@ -470,6 +539,16 @@ function renderStep(step, index, readonly) {
 function actionFields(a, ro) {
   if (a.type === "open_app") return openAppFields(a, ro);
   if (a.type === "set_volume") return [field("Поставить уровень 0-100", input(a.level ?? "", v => a.level = v === "" ? undefined : Number(v), ro, "number")), field("Изменить на", input(a.delta ?? "", v => a.delta = v === "" ? undefined : Number(v), ro, "number", "-15"))];
+  if (a.type === "media_control") return [
+    field("Команда", select(["play_pause", "seek_forward", "seek_backward"], a.command || "play_pause", v => a.command = v, ro, true, { play_pause: "Пауза / продолжить", seek_forward: "Вперёд", seek_backward: "Назад" })),
+    a.command === "play_pause" ? "" : field("Секунд", input(a.seconds ?? 30, v => a.seconds = Number(v || 30), ro, "number", "30"))
+  ];
+  if (a.type === "weather") return [
+    help("Если место не прозвучало в команде, KOMP возьмёт базовый район из настроек."),
+    field("Место", input(a.location || "{{location}}", v => a.location = v, ro)),
+    field("Запасное место", input(a.fallback_location || "{{weather_location}}", v => a.fallback_location = v, ro)),
+    field("Слот результата", input(a.result_slot || "weather", v => a.result_slot = v, ro))
+  ];
   if (a.type === "play_sound" || a.type === "say_sound") return [soundField("Файл", a, "file", ro)];
   if (a.type === "say_text") return sayTextFields(a, ro);
   if (a.type === "ask") return [
@@ -481,9 +560,42 @@ function actionFields(a, ro) {
   if (a.type === "url") return [field("Ссылка", input(a.url || "", v => a.url = v, ro, "text", "https://discord.com"))];
   if (a.type === "hotkey") return [field("Клавиши через +", input((a.keys || []).join("+"), v => a.keys = v.split("+").map(x => x.trim()).filter(Boolean), ro, "text", "cmd+space"))];
   if (a.type === "emit_event") return [field("Название события", input(a.event || "", v => a.event = v, ro))];
-  if (a.type === "http_request") return [field("Method", input(a.method || "GET", v => a.method = v, ro)), field("URL", input(a.url || "", v => a.url = v, ro))];
+  if (a.type === "http_request") return httpRequestFields(a, ro);
+  if (a.type === "convert_currency") return [
+    help("Сумма и валюты обычно приходят из фразы: {{amount}}, {{from}}, {{to}}. Результат сохраняется в слот result."),
+    field("Сумма", input(a.amount || "{{amount}}", v => a.amount = v, ro)),
+    field("Из валюты", input(a.from || "{{from}}", v => a.from = v, ro)),
+    field("В валюту", input(a.to || "{{to}}", v => a.to = v, ro)),
+    field("Слот результата", input(a.result_slot || "result", v => a.result_slot = v, ro)),
+    field("API курсов", input(a.api_url || "https://open.er-api.com/v6/latest/{{from_code}}", v => a.api_url = v, ro))
+  ];
+  if (a.type === "calculate") return [
+    help("Поддерживаются плюс, минус, умножение, деление, степень и скобки. Можно передать {{expression}} из голосовой фразы."),
+    field("Выражение", input(a.expression || "{{expression}}", v => a.expression = v, ro)),
+    field("Слот результата", input(a.result_slot || "result", v => a.result_slot = v, ro))
+  ];
   if (a.type === "shell") return [field("Command", input(a.command || "", v => a.command = v, ro)), field("Enabled", select(["false","true"], String(!!a.enabled), v => a.enabled = v === "true", ro))];
   return [];
+}
+
+function httpRequestFields(a, ro) {
+  const headers = Object.entries(a.headers || {}).map(([key, value]) => `${key}: ${value}`).join("\n");
+  return [
+    help("Ответ можно сохранить целиком или достать поле JSON, например rates.UAH. Затем используйте {{имя_слота}} в следующих шагах."),
+    field("Метод", select(["GET","POST","PUT","PATCH","DELETE"], a.method || "GET", v => a.method = v, ro)),
+    field("URL", input(a.url || "", v => a.url = v, ro, "text", "https://api.example.com/items/{{id}}")),
+    field("Заголовки, по одному на строку", el("textarea", { disabled: ro, value: headers, placeholder: "Authorization: Bearer ...", onInput: e => {
+      a.headers = Object.fromEntries(e.target.value.split("\n").map(line => line.split(/:(.*)/s).slice(0, 2).map(value => value.trim())).filter(([key, value]) => key && value));
+    } })),
+    field("Тело JSON", el("textarea", { disabled: ro, value: a.body == null ? "" : JSON.stringify(a.body, null, 2), placeholder: "{\n  \"message\": \"{{text}}\"\n}", onChange: e => {
+      const value = e.target.value.trim();
+      if (!value) delete a.body;
+      else try { a.body = JSON.parse(value); } catch { setStatus("Тело запроса содержит неверный JSON", true); }
+    } })),
+    field("Сохранить ответ в слот", input(a.response_slot || "", v => a.response_slot = v || undefined, ro, "text", "api_result")),
+    field("Путь к полю JSON", input(a.json_path || "", v => a.json_path = v || undefined, ro, "text", "data.items.0.name")),
+    field("Таймаут, мс", input(a.timeout_ms || 10000, v => a.timeout_ms = Number(v || 10000), ro, "number"))
+  ];
 }
 
 function sayTextFields(a, ro) {
@@ -506,6 +618,11 @@ function availableSlots() {
   const slots = new Set();
   for (const step of state.document?.scenario?.steps || []) {
     if (step.action?.reply_slot) slots.add(step.action.reply_slot);
+    if (step.action?.result_slot) {
+      slots.add(step.action.result_slot);
+      slots.add(`${step.action.result_slot}_phrase`);
+    }
+    if (step.action?.response_slot) slots.add(step.action.response_slot);
     if (step.when?.slot) slots.add(step.when.slot);
   }
   return [...slots];
@@ -606,12 +723,13 @@ function setWhen(step, key, value) { step.when ||= {}; value ? step.when[key] = 
 function addAliases(text) { const lines = text.split(/\n+/).map(s => s.trim()).filter(Boolean); state.document.scenario.aliases = [...new Set([...state.document.scenario.aliases, ...lines])]; render(); }
 function addStep(type = "open_app") { state.document.scenario.steps.push({ id: `step_${state.document.scenario.steps.length + 1}`, action: defaultAction(type) }); render(); }
 function defaultAction(type) {
-  return { open_app:{type,app:""}, set_volume:{type,delta:-10}, say_text:{type,text:"",speed:1,cache:true}, play_sound:{type,file:"sounds/system/listening.mp3"}, say_sound:{type,file:"sounds/system/listening.mp3"}, ask:{type,text:"",reply_slot:"reply"}, wait_for_reply:{type,reply_slot:"reply"}, url:{type,url:"https://"}, hotkey:{type,keys:[]}, emit_event:{type,event:"event_name",payload:{}}, http_request:{type,method:"GET",url:"https://"}, shell:{type,command:"",args:[],enabled:false} }[type];
+  return { open_app:{type,app:""}, set_volume:{type,delta:-10}, media_control:{type,command:"play_pause",seconds:30}, weather:{type,location:"{{location}}",fallback_location:"{{weather_location}}",result_slot:"weather"}, say_text:{type,text:"",speed:1,cache:true}, convert_currency:{type,amount:"{{amount}}",from:"{{from}}",to:"{{to}}",result_slot:"result",api_url:"https://open.er-api.com/v6/latest/{{from_code}}"}, calculate:{type,expression:"{{expression}}",result_slot:"result"}, play_sound:{type,file:"sounds/system/listening.mp3"}, say_sound:{type,file:"sounds/system/listening.mp3"}, ask:{type,text:"",reply_slot:"reply"}, wait_for_reply:{type,reply_slot:"reply"}, url:{type,url:"https://"}, hotkey:{type,keys:[]}, emit_event:{type,event:"event_name",payload:{}}, http_request:{type,method:"GET",url:"https://",headers:{},timeout_ms:10000}, shell:{type,command:"",args:[],enabled:false} }[type];
 }
 function newScenario() { state.view = "scenarios"; state.selected = null; state.document = emptyDoc(); state.errors = []; state.run = null; render(); }
 function openSoundSettings() { state.view = "sounds"; state.selected = null; state.errors = []; state.run = null; setStatus("Системная озвучка"); render(); }
 function openLmStudioSettings() { state.view = "lmstudio"; state.selected = null; state.errors = []; state.run = null; ensureConfig(); setStatus("LM Studio"); render(); }
-function openVoiceSettings() { state.view = "voice"; state.selected = null; state.errors = []; state.run = null; ensureConfig(); setStatus("Голос CosyVoice"); loadTts(); render(); }
+function openVoiceSettings() { state.view = "voice"; state.selected = null; state.errors = []; state.run = null; ensureConfig(); setStatus("Динамический голос"); loadTts(); render(); }
+function openGeneralSettings() { state.view = "settings"; state.selected = null; state.errors = []; state.run = null; ensureConfig(); setStatus("Настройки KOMP"); render(); }
 function ensureConfig() {
   state.config ||= {
     wake_phrase: "комп",
@@ -628,6 +746,11 @@ function ensureConfig() {
     plugin_dirs: ["plugins.example"]
   };
   state.config.lmstudio ||= {};
+  state.config.wake ||= { min_confidence: 0.84, require_final: true };
+  state.config.wake.min_confidence ??= 0.84;
+  state.config.wake.require_final ??= true;
+  state.config.weather ||= { base_location: "Москва" };
+  state.config.weather.base_location ||= "Москва";
   state.config.lmstudio.enabled ??= true;
   state.config.lmstudio.base_url ||= "http://localhost:1234/v1";
   state.config.lmstudio.timeout_ms ||= 2500;
@@ -644,35 +767,100 @@ function ensureConfig() {
   state.config.tts.cache_enabled ??= true;
   state.config.tts.device ||= "auto";
   state.config.tts.playback_mode ||= "buffered";
+  state.config.tts.xtts ||= {};
+  state.config.tts.xtts.base_url ||= "http://127.0.0.1:50010";
+  state.config.tts.xtts.model ||= "tts_models/multilingual/multi-dataset/xtts_v2";
+  state.config.tts.xtts.language ||= "ru";
+  state.config.tts.xtts.device ||= "auto";
+  state.config.tts.xtts.autostart ??= true;
+  state.config.tts.xtts.preload ??= true;
+  state.config.tts.xtts.timeout_ms ||= 120000;
+  state.config.tts.xtts.license_accepted ??= false;
   return state.config;
 }
 
 async function saveTtsConfig() {
-  try { state.config = await api("/config", { method: "POST", body: JSON.stringify(ensureConfig()) }); await loadTts(); }
-  catch (e) { state.errors = [e.message]; render(); }
+  const revision = ++state.ttsConfigSaveRevision;
+  const snapshot = JSON.parse(JSON.stringify(ensureConfig()));
+  state.ttsConfigSaveState = "saving";
+  render();
+  const request = state.ttsConfigSaveQueue.then(() => api("/config", { method: "POST", body: JSON.stringify(snapshot) }));
+  state.ttsConfigSaveQueue = request.catch(() => {});
+  try {
+    const saved = await request;
+    if (revision === state.ttsConfigSaveRevision) {
+      state.config = saved;
+      state.ttsConfigSaveState = "saved";
+      await loadTts();
+    }
+    return true;
+  } catch (e) {
+    if (revision === state.ttsConfigSaveRevision) {
+      state.ttsConfigSaveState = "error";
+      state.errors = [e.message];
+      render();
+    }
+    return false;
+  }
+}
+
+async function saveGeneralSettings() {
+  const location = ensureConfig().weather.base_location.trim();
+  if (!location) {
+    state.errors = ["Укажите базовый район или город для погоды"];
+    setStatus("Настройки не сохранены");
+    render();
+    return;
+  }
+  const saved = await saveTtsConfig();
+  setStatus(saved ? "Настройки сохранены. Перезапустите прослушивание для нового wake-фильтра." : "Настройки не сохранены");
+  render();
 }
 
 async function installTts() {
-  setStatus("Установка CosyVoice запущена. Прогресс виден в консоли daemon...");
-  try { await api("/tts/install", { method: "POST", body: "{}", noRetry: true }); }
+  const provider = ensureConfig().tts.provider === "xtts" ? "xtts" : "cosyvoice";
+  setStatus(`Установка ${provider === "xtts" ? "XTTS v2" : "CosyVoice"} запущена. Прогресс виден в консоли daemon...`);
+  try { await api(`/tts/providers/${provider}/install`, { method: "POST", body: "{}", noRetry: true }); }
   catch (e) { state.errors = [e.message]; setStatus("Не удалось запустить установку"); render(); }
 }
 
 async function startTts() {
-  setStatus("Загружаю модель CosyVoice...");
-  try { await api("/tts/start", { method: "POST", body: "{}", noRetry: true }); await loadTts(); setStatus("CosyVoice запущен"); }
-  catch (e) { state.errors = [e.message]; setStatus("CosyVoice не запустился"); render(); }
+  const provider = ensureConfig().tts.provider === "xtts" ? "xtts" : "cosyvoice";
+  const name = provider === "xtts" ? "XTTS v2" : "CosyVoice";
+  setStatus(`Загружаю модель ${name}...`);
+  try { await api(`/tts/providers/${provider}/start`, { method: "POST", body: "{}", noRetry: true }); await loadTts(); setStatus(`${name} запущен`); }
+  catch (e) { state.errors = [e.message]; setStatus(`${name} не запустился`); render(); }
 }
 
 async function stopTts() {
-  try { await api("/tts/stop", { method: "POST", body: "{}", noRetry: true }); await loadTts(); setStatus("CosyVoice остановлен"); }
+  const provider = ensureConfig().tts.provider === "xtts" ? "xtts" : "cosyvoice";
+  try { await api(`/tts/providers/${provider}/stop`, { method: "POST", body: "{}", noRetry: true }); await loadTts(); setStatus("Движок остановлен"); }
   catch (e) { state.errors = [e.message]; render(); }
+}
+
+async function selectTtsProvider(provider) {
+  const tts = ensureConfig().tts;
+  if (provider === "xtts" && tts.provider !== "xtts") tts.playback_mode = "streaming";
+  tts.provider = provider;
+  state.ttsBenchmark = null;
+  if (await saveTtsConfig()) setStatus(`Выбран ${provider === "xtts" ? "XTTS v2" : "CosyVoice"}`);
+}
+
+async function benchmarkTts() {
+  const provider = ensureConfig().tts.provider === "xtts" ? "xtts" : "cosyvoice";
+  setStatus("Измеряю скорость синтеза...");
+  try {
+    const result = await api(`/tts/providers/${provider}/benchmark`, { method: "POST", body: JSON.stringify({ text: state.ttsTestText, voice: null, speed: 1, cache: false }), noRetry: true });
+    state.ttsBenchmark = result.benchmark;
+    setStatus("Проверка скорости завершена");
+  } catch (e) { state.errors = [e.message]; setStatus("Не удалось измерить скорость"); render(); }
 }
 
 async function uploadVoice() {
   const file = state.voiceDraft.file;
-  if (!file || !state.voiceDraft.prompt_text.trim() || !state.voiceDraft.id) {
-    state.errors = ["Выберите аудиофайл, задайте имя и точную расшифровку."];
+  const needsTranscript = ensureConfig().tts.provider !== "xtts";
+  if (!file || !state.voiceDraft.id || (needsTranscript && !state.voiceDraft.prompt_text.trim())) {
+    state.errors = [needsTranscript ? "Выберите аудиофайл, задайте имя и точную расшифровку." : "Выберите аудиофайл и задайте имя профиля."];
     render();
     return;
   }
@@ -682,7 +870,7 @@ async function uploadVoice() {
     const result = await api("/tts/voices", { method: "POST", body: JSON.stringify({ id: state.voiceDraft.id, prompt_text: state.voiceDraft.prompt_text, file_name: file.name, data_base64: dataUrl.split(",")[1] || "" }) });
     ensureConfig().tts.voice_id = result.voice.id;
     ensureConfig().tts.enabled = true;
-    await saveTtsConfig();
+    if (!await saveTtsConfig()) return;
     state.voiceDraft.file = null;
     setStatus("Голос сохранён");
   } catch (e) { state.errors = [e.message]; setStatus("Не удалось сохранить голос"); render(); }
@@ -691,8 +879,7 @@ async function uploadVoice() {
 async function selectVoice(id) {
   ensureConfig().tts.voice_id = id;
   ensureConfig().tts.enabled = true;
-  await saveTtsConfig();
-  setStatus(`Выбран голос ${id}`);
+  if (await saveTtsConfig()) setStatus(`Выбран голос ${id}`);
 }
 
 async function testTtsText(text, voice, speed = 1, cache = true) {
